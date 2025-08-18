@@ -1,4 +1,6 @@
 // Profile data store with real-time updates
+const IS_BROWSER = typeof window !== "undefined";
+
 interface UserProfile {
   uid: string
   email: string
@@ -91,7 +93,9 @@ class ProfileStore {
 
   private constructor() {
     this.loadProfile()
-    this.setupStorageListener()
+    if (IS_BROWSER) {
+      this.setupStorageListener()
+    }
   }
 
   static getInstance(): ProfileStore {
@@ -103,7 +107,11 @@ class ProfileStore {
 
   private loadProfile(): void {
     try {
-      const savedProfile = localStorage.getItem("userProfile")
+      if (!IS_BROWSER) {
+        this.profile = this.profile ?? this.getDefaultProfile()
+        return
+      }
+      const savedProfile = window.localStorage.getItem("userProfile")
       if (savedProfile) {
         this.profile = JSON.parse(savedProfile)
         this.calculateDynamicStats()
@@ -179,10 +187,10 @@ class ProfileStore {
 
   private calculateDynamicStats(): void {
     if (!this.profile) return
-
+    if (!IS_BROWSER) return
     try {
       // Get scan history for dynamic stats calculation
-      const scanHistory = JSON.parse(localStorage.getItem("scanHistory") || "[]")
+      const scanHistory = JSON.parse(window.localStorage.getItem("scanHistory") || "[]")
       const now = new Date()
       const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
       const oneMonthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
@@ -370,6 +378,8 @@ class ProfileStore {
   }
 
   private setupStorageListener(): void {
+    if (!IS_BROWSER) return;
+
     window.addEventListener("storage", (e) => {
       if (e.key === "userProfile" || e.key === "scanHistory") {
         this.loadProfile()
@@ -421,11 +431,13 @@ class ProfileStore {
     this.notifyListeners()
 
     // Dispatch custom event for other components
-    window.dispatchEvent(
-      new CustomEvent("profileUpdated", {
-        detail: this.profile,
-      }),
-    )
+    if (IS_BROWSER) {
+      window.dispatchEvent(
+        new CustomEvent("profileUpdated", {
+          detail: this.profile,
+        }),
+      )
+    }
   }
 
   private deepMerge(target: any, source: any): any {
@@ -443,9 +455,8 @@ class ProfileStore {
   }
 
   private saveProfile(): void {
-    if (this.profile) {
-      localStorage.setItem("userProfile", JSON.stringify(this.profile))
-    }
+    if (!this.profile || !IS_BROWSER) return
+    window.localStorage.setItem("userProfile", JSON.stringify(this.profile))
   }
 
   // Calculate daily needs based on profile data
@@ -513,11 +524,13 @@ class ProfileStore {
     this.notifyListeners()
 
     // Dispatch scan completed event
-    window.dispatchEvent(
-      new CustomEvent("scanCompleted", {
-        detail: scanData,
-      }),
-    )
+    if (IS_BROWSER) {
+      window.dispatchEvent(
+        new CustomEvent("scanCompleted", {
+          detail: scanData,
+        }),
+      )
+    }
   }
 
   // Reset daily progress (called at midnight)

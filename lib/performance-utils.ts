@@ -64,19 +64,21 @@ export class PerformanceOptimizer {
     keysToDelete.forEach(key => this.cache.delete(key))
   }
 
-  // Optimized localStorage operations
+  // Optimized localStorage operations (safe on server)
   static setStorageItem(key: string, value: any): void {
+    if (typeof window === "undefined") return; // avoid SSR crash
     try {
       const serialized = JSON.stringify(value)
-      localStorage.setItem(key, serialized)
+      window.localStorage.setItem(key, serialized)
     } catch (error) {
       console.warn(`Failed to save to localStorage: ${key}`, error)
     }
   }
 
   static getStorageItem<T>(key: string, defaultValue: T): T {
+    if (typeof window === "undefined") return defaultValue; // safe fallback
     try {
-      const item = localStorage.getItem(key)
+      const item = window.localStorage.getItem(key)
       return item ? JSON.parse(item) : defaultValue
     } catch (error) {
       console.warn(`Failed to read from localStorage: ${key}`, error)
