@@ -1,3 +1,4 @@
+
 "use client"
 
 import type React from "react"
@@ -9,6 +10,8 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
+import Tesseract from "tesseract.js"
+import { BrowserMultiFormatReader, NotFoundException, BarcodeFormat, DecodeHintType } from '@zxing/library'
 
 interface ScanStep {
   id: number
@@ -22,6 +25,7 @@ interface OCRResult {
   text: string
   confidence?: number
   type: "barcode" | "label" | "nutrition"
+  method?: string
 }
 
 interface Product {
@@ -43,6 +47,39 @@ interface ManualNutritionData {
   protein?: number
   sodium?: number
   ingredients?: string
+}
+
+interface LabelStructureData {
+  productName: string | null
+  brand: string | null
+  ingredients: string | null
+  confidence: "high" | "medium" | "low"
+}
+
+// OpenFoodFacts resolver function
+async function fetchFromOFF(barcode: string) {
+  const endpoints = [
+    "https://world.openfoodfacts.org/api/v0/product/",
+    "https://in.openfoodfacts.org/api/v0/product/",
+  ]
+
+  for (const base of endpoints) {
+    try {
+      const res = await fetch(`${base}${barcode}.json`)
+      const data = await res.json()
+
+      if (data.status === 1) {
+        return {
+          product: data.product,
+          source: base.includes("in.") ? "IN" : "GLOBAL",
+        }
+      }
+    } catch {
+      continue
+    }
+  }
+
+  return null
 }
 
 export default function ScanComponent() {
@@ -69,6 +106,7 @@ export default function ScanComponent() {
   const streamRef = useRef<MediaStream | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const codeReaderRef = useRef<BrowserMultiFormatReader | null>(null)
 
   const scanSteps: ScanStep[] = [
     {
@@ -93,6 +131,29 @@ export default function ScanComponent() {
       color: "from-lime-500 to-green-500",
     },
   ]
+
+  // Initialize ZXing code reader with optimized settings
+  useEffect(() => {
+    const hints = new Map()
+    hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+      BarcodeFormat.EAN_13,
+      BarcodeFormat.EAN_8,
+      BarcodeFormat.UPC_A,
+      BarcodeFormat.UPC_E,
+      BarcodeFormat.CODE_128,
+      BarcodeFormat.CODE_39,
+      BarcodeFormat.CODE_93,
+    ])
+    hints.set(DecodeHintType.TRY_HARDER, true)
+    
+    codeReaderRef.current = new BrowserMultiFormatReader(hints)
+    
+    return () => {
+      if (codeReaderRef.current) {
+        codeReaderRef.current.reset()
+      }
+    }
+  }, [])
 
   // Voice guidance
   const speak = useCallback(
@@ -127,8 +188,8 @@ export default function ScanComponent() {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: "environment",
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
         },
       })
 
@@ -146,13 +207,16 @@ export default function ScanComponent() {
       speak("Camera access failed. Please use the upload option.")
       showStatusMessage("Camera access denied. Please upload an image instead.", "error")
     }
-  }, [currentStep, speak, showStatusMessage])
+  }, [currentStep, speak, showStatusMessage, scanSteps])
 
   // Stop camera
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop())
       streamRef.current = null
+    }
+    if (codeReaderRef.current) {
+      codeReaderRef.current.reset()
     }
     setIsScanning(false)
   }, [])
@@ -171,55 +235,25 @@ export default function ScanComponent() {
     canvas.height = video.videoHeight
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
 
-    return canvas.toDataURL("image/jpeg", 0.8)
+    return canvas.toDataURL("image/jpeg", 0.95)
   }, [])
 
-  // Fetch product from OpenFoodFacts API
-  const fetchProductData = async (barcode: string): Promise<Product | null> => {
-    try {
-      // Try India API first, then global API
-      const indiaURL = `https://in.openfoodfacts.org/api/v0/product/${barcode}.json`
-      const globalURL = `https://world.openfoodfacts.org/api/v0/product/${barcode}.json`
-
-      let response = await fetch(indiaURL)
-      let data = await response.json()
-
-      // If not found in India API, try global API
-      if (data.status !== 1) {
-        response = await fetch(globalURL)
-        data = await response.json()
-      }
-
-      if (data.status === 1 && data.product) {
-        return data.product
-      }
-      return null
-    } catch (error) {
-      console.error("Failed to fetch product data:", error)
-      return null
-    }
-  }
-
-  // Redirect to analysis page with immediate loading animation
-  const redirectToAnalysis = (productData: Product) => {
-    // IMMEDIATE loading animation
+  // Redirect to analysis page with product data
+  const redirectToAnalysis = useCallback((productData: Product) => {
     setIsRedirecting(true)
 
-    // OPTIMIZED: Streamlined product data preparation
     const productWithScanInfo = {
       ...productData,
-      _scanMethod: currentStep === 0 ? "barcode" : currentStep === 1 ? "search" : "manual",
+      _scanMethod: currentStep === 0 ? "barcode" : currentStep === 1 ? "label" : "manual",
       _scannedAt: new Date().toISOString(),
     }
 
-    // IMMEDIATE storage and navigation
     localStorage.setItem("selectedProduct", JSON.stringify(productWithScanInfo))
     localStorage.setItem("isRedirecting", "true")
     speak("Redirecting to analysis.")
 
-    // IMMEDIATE navigation - no delays
     router.push("/analysis")
-  }
+  }, [currentStep, router, speak])
 
   // Create product from manual data
   const createManualProduct = (): Product => {
@@ -234,259 +268,397 @@ export default function ScanComponent() {
         sugars_100g: manualData.sugars || 0,
         fiber_100g: manualData.fiber || 0,
         proteins_100g: manualData.protein || 0,
-        sodium_100g: (manualData.sodium || 0) / 1000, // Convert mg to g
+        sodium_100g: (manualData.sodium || 0) / 1000,
       },
       ingredients_text: manualData.ingredients || "Ingredients not specified",
-      nutrition_grades_tags: ["c"], // Default grade for manual entries
-      _manual_entry: true, // Flag to identify manual entries
+      nutrition_grades_tags: ["c"],
+      _manual_entry: true,
     }
   }
 
-  // Extract text from image using real OCR/barcode detection
-  const extractTextFromImage = async (imageData: string): Promise<OCRResult> => {
+  // Enhanced image preprocessing with multiple techniques
+  const preprocessImage = async (imageData: string, technique: 'contrast' | 'grayscale' | 'sharpen' | 'binary'): Promise<string> => {
+    return new Promise((resolve) => {
+      const img = new Image()
+      img.onload = () => {
+        const canvas = document.createElement('canvas')
+        const ctx = canvas.getContext('2d')
+        if (!ctx) {
+          resolve(imageData)
+          return
+        }
+
+        canvas.width = img.width
+        canvas.height = img.height
+        ctx.drawImage(img, 0, 0)
+        
+        const imageDataObj = ctx.getImageData(0, 0, canvas.width, canvas.height)
+        const data = imageDataObj.data
+
+        if (technique === 'contrast') {
+          // High contrast enhancement
+          for (let i = 0; i < data.length; i += 4) {
+            const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114
+            const contrast = 2.0
+            const factor = (259 * (contrast + 255)) / (255 * (259 - contrast))
+            const enhanced = factor * (gray - 128) + 128
+            data[i] = data[i + 1] = data[i + 2] = enhanced
+          }
+        } else if (technique === 'grayscale') {
+          // Simple grayscale
+          for (let i = 0; i < data.length; i += 4) {
+            const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114
+            data[i] = data[i + 1] = data[i + 2] = gray
+          }
+        } else if (technique === 'sharpen') {
+          // Sharpening filter
+          const tempData = new Uint8ClampedArray(data)
+          for (let i = 0; i < data.length; i += 4) {
+            if (i > canvas.width * 4 && i < data.length - canvas.width * 4) {
+              const gray = tempData[i] * 0.299 + tempData[i + 1] * 0.587 + tempData[i + 2] * 0.114
+              const sharpened = gray * 9 - (tempData[i - 4] + tempData[i + 4] + tempData[i - canvas.width * 4] + tempData[i + canvas.width * 4]) * 2
+              data[i] = data[i + 1] = data[i + 2] = Math.min(255, Math.max(0, sharpened))
+            }
+          }
+        } else if (technique === 'binary') {
+          // Binary thresholding
+          const threshold = 128
+          for (let i = 0; i < data.length; i += 4) {
+            const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114
+            const binary = gray > threshold ? 255 : 0
+            data[i] = data[i + 1] = data[i + 2] = binary
+          }
+        }
+
+        ctx.putImageData(imageDataObj, 0, 0)
+        resolve(canvas.toDataURL('image/jpeg', 0.95))
+      }
+      img.src = imageData
+    })
+  }
+
+  // Multi-method barcode extraction with all available techniques
+  const extractBarcodeFromImage = async (imageData: string): Promise<OCRResult> => {
     try {
-      if (currentStep === 0) {
-        // OPTIMIZED: Faster barcode detection
-        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${process.env.NEXT_PUBLIC_GEMINI_API_KEY}`,
-          },
-          body: JSON.stringify({
-            model: "meta-llama/llama-4-scout-17b-16e-instruct",
-            messages: [
-              {
-                role: "user",
-                content: [
-                  {
-                    type: "text",
-                    text: "Find barcode number. Return only digits (8-13 digits) or 'NO_BARCODE'.",
-                  },
-                  { type: "image_url", image_url: { url: imageData } },
-                ],
-              },
-            ],
-            temperature: 0, // OPTIMIZED: Fastest, most deterministic response
-            max_completion_tokens: 50, // OPTIMIZED: Reduced for speed
-          }),
+      console.log("🔍 Starting comprehensive barcode detection...")
+      
+      // Method 1: ZXing on original image
+      try {
+        console.log("📷 Method 1: ZXing on original image...")
+        if (!codeReaderRef.current) {
+          const hints = new Map()
+          hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+            BarcodeFormat.EAN_13, BarcodeFormat.EAN_8, BarcodeFormat.UPC_A, 
+            BarcodeFormat.UPC_E, BarcodeFormat.CODE_128, BarcodeFormat.CODE_39,
+          ])
+          hints.set(DecodeHintType.TRY_HARDER, true)
+          codeReaderRef.current = new BrowserMultiFormatReader(hints)
+        }
+
+        const img = new Image()
+        img.src = imageData
+        await new Promise((resolve, reject) => {
+          img.onload = resolve
+          img.onerror = reject
         })
 
-        const data = await response.json()
-        const extractedText = data?.choices?.[0]?.message?.content || "NO_BARCODE"
-
-        return {
-          text: extractedText.trim(),
-          confidence: extractedText.includes("NO_BARCODE") ? 0 : 0.9,
-          type: "barcode",
+        const result = await codeReaderRef.current.decodeFromImageElement(img)
+        if (result && result.getText()) {
+          console.log("✅ ZXing (original) detected:", result.getText())
+          return { text: result.getText(), confidence: 0.95, type: "barcode", method: "ZXing-Original" }
         }
-      } else if (currentStep === 1) {
-        // OPTIMIZED: Faster label extraction
-        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${process.env.NEXT_PUBLIC_GEMINI_API_KEY}`,
-          },
-          body: JSON.stringify({
-            model: "meta-llama/llama-4-scout-17b-16e-instruct",
-            messages: [
-              {
-                role: "user",
-                content: [
-                  {
-                    type: "text",
-                    text: "Extract: NAME: [product name], BRAND: [brand], INGREDIENTS: [ingredients]",
-                  },
-                  { type: "image_url", image_url: { url: imageData } },
-                ],
-              },
-            ],
-            temperature: 0.1, // OPTIMIZED: Faster response
-            max_completion_tokens: 200, // OPTIMIZED: Reduced for speed
-          }),
+      } catch (error) {
+        console.log("❌ ZXing (original) failed:", error instanceof NotFoundException ? "Not found" : error)
+      }
+
+      // Method 2: ZXing on contrast-enhanced image
+      try {
+        console.log("📷 Method 2: ZXing on contrast-enhanced image...")
+        const contrastImage = await preprocessImage(imageData, 'contrast')
+        const img2 = new Image()
+        img2.src = contrastImage
+        await new Promise((resolve, reject) => {
+          img2.onload = resolve
+          img2.onerror = reject
         })
 
-        const data = await response.json()
-        const extractedText = data?.choices?.[0]?.message?.content || "No label information found"
-
-        return {
-          text: extractedText,
-          confidence: 0.75,
-          type: "label",
+        if (codeReaderRef.current) {
+          const result2 = await codeReaderRef.current.decodeFromImageElement(img2)
+          if (result2 && result2.getText()) {
+            console.log("✅ ZXing (contrast) detected:", result2.getText())
+            return { text: result2.getText(), confidence: 0.92, type: "barcode", method: "ZXing-Contrast" }
+          }
         }
-      } else {
-        // OPTIMIZED: Faster nutrition extraction
-        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${process.env.NEXT_PUBLIC_GEMINI_API_KEY}`,
-          },
-          body: JSON.stringify({
-            model: "meta-llama/llama-4-scout-17b-16e-instruct",
-            messages: [
-              {
-                role: "user",
-                content: [
-                  {
-                    type: "text",
-                    text: "Extract nutrition: calories, fat, carbs, protein, sugar, sodium, fiber as numbers.",
-                  },
-                  { type: "image_url", image_url: { url: imageData } },
-                ],
-              },
-            ],
-            temperature: 0.1, // OPTIMIZED: Faster response
-            max_completion_tokens: 150, // OPTIMIZED: Reduced for speed
-          }),
+      } catch (error) {
+        console.log("❌ ZXing (contrast) failed")
+      }
+
+      // Method 3: ZXing on grayscale image
+      try {
+        console.log("📷 Method 3: ZXing on grayscale image...")
+        const grayImage = await preprocessImage(imageData, 'grayscale')
+        const img3 = new Image()
+        img3.src = grayImage
+        await new Promise((resolve, reject) => {
+          img3.onload = resolve
+          img3.onerror = reject
         })
 
-        const data = await response.json()
-        const extractedText = data?.choices?.[0]?.message?.content || "No nutrition facts found"
-
-        return {
-          text: extractedText,
-          confidence: 0.8,
-          type: "nutrition",
+        if (codeReaderRef.current) {
+          const result3 = await codeReaderRef.current.decodeFromImageElement(img3)
+          if (result3 && result3.getText()) {
+            console.log("✅ ZXing (grayscale) detected:", result3.getText())
+            return { text: result3.getText(), confidence: 0.90, type: "barcode", method: "ZXing-Grayscale" }
+          }
         }
+      } catch (error) {
+        console.log("❌ ZXing (grayscale) failed")
+      }
+
+      // Method 4: Tesseract OCR on binary thresholded image (optimized for barcodes)
+      try {
+        console.log("📷 Method 4: Tesseract on binary image...")
+        const binaryImage = await preprocessImage(imageData, 'binary')
+        const response = await fetch(binaryImage)
+        const blob = await response.blob()
+
+        const { data } = await Tesseract.recognize(blob, "eng", {
+          logger: (m) => console.log("Tesseract:", m.status),
+          tessedit_char_whitelist: '0123456789',
+        })
+
+        const digitsOnly = data.text.replace(/\D/g, '')
+        console.log("Tesseract found digits:", digitsOnly)
+        
+        // Look for valid barcode patterns
+        const patterns = [
+          digitsOnly.match(/\d{13}/),  // EAN-13
+          digitsOnly.match(/\d{12}/),  // UPC-A
+          digitsOnly.match(/\d{8}/),   // EAN-8
+        ]
+
+        for (const match of patterns) {
+          if (match) {
+            console.log("✅ Tesseract detected barcode:", match[0])
+            return { text: match[0], confidence: 0.75, type: "barcode", method: "Tesseract-Binary" }
+          }
+        }
+      } catch (error) {
+        console.error("❌ Tesseract failed:", error)
+      }
+
+      // Method 5: Groq AI Vision (if API key available)
+      if (process.env.NEXT_PUBLIC_GROQ_API_KEY) {
+        try {
+          console.log("📷 Method 5: Groq AI Vision...")
+          const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${process.env.NEXT_PUBLIC_GROQ_API_KEY}`,
+            },
+            body: JSON.stringify({
+              model: "llama-3.2-90b-vision-preview",
+              messages: [
+                {
+                  role: "user",
+                  content: [
+                    {
+                      type: "text",
+                      text: "Find the barcode number in this image. Return ONLY the digits (8-13 digits) or 'NO_BARCODE' if not found.",
+                    },
+                    { type: "image_url", image_url: { url: imageData } },
+                  ],
+                },
+              ],
+              temperature: 0,
+              max_tokens: 50,
+            }),
+          })
+
+          const data = await response.json()
+          const extractedText = data?.choices?.[0]?.message?.content?.trim() || "NO_BARCODE"
+          
+          if (extractedText !== "NO_BARCODE") {
+            const barcodeMatch = extractedText.match(/\d{8,13}/)
+            if (barcodeMatch) {
+              console.log("✅ Groq AI detected barcode:", barcodeMatch[0])
+              return { text: barcodeMatch[0], confidence: 0.85, type: "barcode", method: "Groq-AI" }
+            }
+          }
+        } catch (error) {
+          console.log("❌ Groq AI failed:", error)
+        }
+      }
+
+      console.log("❌ All barcode detection methods failed")
+      return { text: "NO_BARCODE", confidence: 0, type: "barcode", method: "None" }
+    } catch (error) {
+      console.error("Barcode extraction error:", error)
+      return { text: "NO_BARCODE", confidence: 0, type: "barcode", method: "Error" }
+    }
+  }
+
+  // Enhanced label extraction with Tesseract
+  const extractLabelFromImage = async (imageData: string): Promise<OCRResult> => {
+    try {
+      console.log("📝 Extracting label with Tesseract...")
+      const response = await fetch(imageData)
+      const blob = await response.blob()
+
+      const { data } = await Tesseract.recognize(blob, "eng", {
+        logger: (m) => console.log("Tesseract:", m.status),
+      })
+
+      console.log("✅ Label extracted, confidence:", data.confidence)
+      return {
+        text: data.text,
+        confidence: data.confidence / 100,
+        type: "label",
+        method: "Tesseract"
       }
     } catch (error) {
-      console.error("OCR extraction failed:", error)
+      console.error("Label extraction failed:", error)
       return {
-        text: "Extraction failed. Please try again.",
+        text: "Extraction failed",
         confidence: 0,
-        type: currentStep === 0 ? "barcode" : currentStep === 1 ? "label" : "nutrition",
+        type: "label",
+        method: "Error"
       }
     }
   }
 
-  // Parse label data from GroqAI response
-  const parseLabelData = (text: string) => {
-    const nameMatch = text.match(/NAME:\s*([^,\n]+)/i)
-    const brandMatch = text.match(/BRAND:\s*([^,\n]+)/i)
-    const ingredientsMatch = text.match(/INGREDIENTS:\s*([^,\n]+)/i)
+  // Structure label data using Gemini API
+  const structureLabelData = async (rawText: string): Promise<LabelStructureData | null> => {
+    try {
+      const res = await fetch("/api/gemini/structure-label", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rawText }),
+      })
 
-    return {
-      name: nameMatch?.[1]?.trim() || "",
-      brand: brandMatch?.[1]?.trim() || "",
-      ingredients: ingredientsMatch?.[1]?.trim() || "",
-    }
-  }
+      const result = await res.json()
 
-  // Parse nutrition data from GroqAI response
-  const parseNutritionData = (text: string) => {
-    const caloriesMatch = text.match(/calories?:\s*(\d+)/i)
-    const fatMatch = text.match(/fat:\s*(\d+(?:\.\d+)?)/i)
-    const carbsMatch = text.match(/carb(?:ohydrate)?s?:\s*(\d+(?:\.\d+)?)/i)
-    const proteinMatch = text.match(/protein:\s*(\d+(?:\.\d+)?)/i)
-    const sugarMatch = text.match(/sugar:\s*(\d+(?:\.\d+)?)/i)
-    const sodiumMatch = text.match(/sodium:\s*(\d+(?:\.\d+)?)/i)
+      if (result.success) {
+        return result.data
+      }
 
-    return {
-      calories: caloriesMatch ? Number(caloriesMatch[1]) : undefined,
-      fat: fatMatch ? Number(fatMatch[1]) : undefined,
-      carbs: carbsMatch ? Number(carbsMatch[1]) : undefined,
-      protein: proteinMatch ? Number(proteinMatch[1]) : undefined,
-      sugars: sugarMatch ? Number(sugarMatch[1]) : undefined,
-      sodium: sodiumMatch ? Number(sodiumMatch[1]) : undefined,
+      return null
+    } catch (error) {
+      console.error("Label structuring failed:", error)
+      return null
     }
   }
 
   // Auto-process image when captured or uploaded
   const autoProcessImage = useCallback(
     async (imageData: string) => {
-    setIsProcessing(true)
-    setScanAnimation(true)
-    vibrate([100, 50, 100])
+      setIsProcessing(true)
+      setScanAnimation(true)
+      vibrate([100, 50, 100])
 
-    try {
-      // REMOVED: Artificial delay for fastest processing
-      // Extract text using OCR - optimized for speed
-      const result = await extractTextFromImage(imageData)
-      setOcrResult(result)
+      try {
+        if (currentStep === 0) {
+          // BARCODE SCAN
+          speak("Detecting barcode with multiple methods...")
+          showStatusMessage("Scanning barcode with advanced detection...", "info")
 
-      vibrate([200, 100, 200])
+          const result = await extractBarcodeFromImage(imageData)
+          setOcrResult(result)
 
-      // Handle barcode detection with immediate processing
-      if (result.type === "barcode" && currentStep === 0) {
-        if (result.text !== "NO_BARCODE" && result.confidence > 0.5) {
-          const barcodeMatch = result.text.match(/\d{8,13}/)
-          if (barcodeMatch) {
-            speak("Barcode detected. Redirecting...")
-            showStatusMessage("Barcode found! Loading analysis...", "success")
+          if (result.text !== "NO_BARCODE" && result.confidence && result.confidence > 0.5) {
+            vibrate([200, 100, 200])
+            speak("Barcode detected. Looking up product...")
+            showStatusMessage(`Barcode ${result.text} found using ${result.method}! Looking up...`, "success")
 
-            // OPTIMIZED: Immediate product lookup and redirect
-            const productData = await fetchProductData(barcodeMatch[0])
+            const productData = await fetchFromOFF(result.text)
 
             if (productData) {
-              // IMMEDIATE redirect without delays
-              redirectToAnalysis(productData)
+              speak("Product found. Redirecting to analysis.")
+              showStatusMessage(`Product found from ${productData.source}! Loading analysis...`, "success")
+              redirectToAnalysis(productData.product)
               return
             } else {
-              speak("Product not found. Try other options.")
-              showStatusMessage("Product not in database. Try label scan or manual entry.", "info")
+              speak("Product not found in database. Try label scan or manual entry.")
+              showStatusMessage(`Barcode ${result.text} not in database. Try label scan or manual entry.`, "error")
+              vibrate([300, 100, 300])
             }
           } else {
-            speak("Invalid barcode. Please try again.")
-            showStatusMessage("Invalid barcode format. Please try again.", "error")
+            speak("No barcode detected. Please try again, reposition, or use label scan.")
+            showStatusMessage("No barcode found. Try repositioning the image or use label scan.", "error")
+            vibrate([300, 100, 300])
           }
-        } else {
-          speak("No barcode detected. Try again.")
-          showStatusMessage("No barcode found. Try again or use other options.", "error")
-        }
-      } else if (result.type === "label" && currentStep === 1) {
-        // OPTIMIZED: Faster label processing
-        const labelData = parseLabelData(result.text)
-        if (labelData.name) {
-          setProductName(labelData.name)
-          setBrandName(labelData.brand || "")
-          if (labelData.ingredients) {
-            setManualData((prev) => ({ ...prev, ingredients: labelData.ingredients }))
-          }
-          speak("Label extracted. Adding details...")
-          showStatusMessage("Label information extracted!", "success")
-          setCurrentStep(2)
-          setShowManualEntry(true)
-        } else {
-          speak("Label unclear. Try manual entry.")
-          showStatusMessage("Unable to read label clearly. Please try manual entry.", "error")
-        }
-      } else if (result.type === "nutrition" && currentStep === 2) {
-        // OPTIMIZED: Faster nutrition extraction
-        const nutritionData = parseNutritionData(result.text)
-        setManualData((prev) => ({ ...prev, ...nutritionData }))
-        speak("Nutrition facts extracted. Review and submit.")
-        showStatusMessage("Nutrition facts extracted successfully!", "success")
-        setShowManualEntry(true)
-      }
-    } catch (error) {
-      console.error("Scan processing failed:", error)
-      speak("Scan failed. Try again.")
-      showStatusMessage("Processing failed. Please try again.", "error")
-      vibrate([300, 100, 300])
-    } finally {
-      setIsProcessing(false)
-      setScanAnimation(false)
-    }
-  },
-  [currentStep, vibrate, speak, showStatusMessage],
-)
+        } else if (currentStep === 1) {
+          // LABEL SCAN
+          speak("Extracting label information...")
+          showStatusMessage("Scanning label...", "info")
 
-  // Process scan - now just captures image and auto-processes
+          const result = await extractLabelFromImage(imageData)
+          setOcrResult(result)
+
+          if (result.confidence && result.confidence < 0.6) {
+            speak("Label unclear. Please try manual entry.")
+            showStatusMessage("Unable to read label clearly. Please use manual entry.", "error")
+            vibrate([300, 100, 300])
+            setCurrentStep(2)
+            setShowManualEntry(true)
+            return
+          }
+
+          vibrate([200, 100, 200])
+          speak("Label extracted. Structuring information...")
+          showStatusMessage("Label scanned! Extracting information...", "success")
+
+          const structured = await structureLabelData(result.text)
+
+          if (structured && structured.productName) {
+            setProductName(structured.productName)
+            setBrandName(structured.brand || "")
+            if (structured.ingredients) {
+              setManualData((prev) => ({ ...prev, ingredients: structured.ingredients || "" }))
+            }
+
+            speak("Label information extracted. Please review and add nutritional details.")
+            showStatusMessage("Label information extracted! Please complete nutritional details.", "success")
+            vibrate([100, 50, 100, 50, 100])
+            setCurrentStep(2)
+            setShowManualEntry(true)
+          } else {
+            speak("Unable to extract clear information. Please try manual entry.")
+            showStatusMessage("Unable to extract label information. Please use manual entry.", "error")
+            vibrate([300, 100, 300])
+            setCurrentStep(2)
+            setShowManualEntry(true)
+          }
+        } else {
+          // MANUAL ENTRY
+          speak("Please enter product information manually.")
+          showStatusMessage("Please enter product details manually.", "info")
+          setShowManualEntry(true)
+        }
+      } catch (error) {
+        console.error("Scan processing failed:", error)
+        speak("Scan failed. Please try again.")
+        showStatusMessage("Processing failed. Please try again.", "error")
+        vibrate([300, 100, 300])
+      } finally {
+        setIsProcessing(false)
+        setScanAnimation(false)
+      }
+    },
+    [currentStep, vibrate, speak, showStatusMessage, redirectToAnalysis],
+  )
+
+  // Process scan - captures image and auto-processes
   const processScan = useCallback(async () => {
     if (!isScanning && !capturedImage) {
       await initCamera()
       return
     }
 
-    let imageData: string
-
     if (capturedImage) {
-      // If image already captured, process it
       await autoProcessImage(capturedImage)
     } else {
-      // Capture new image from video
       const captured = captureImage()
       if (!captured) {
         showStatusMessage("Failed to capture image. Please try again.", "error")
@@ -494,13 +666,11 @@ export default function ScanComponent() {
       }
       setCapturedImage(captured)
       stopCamera()
-
-      // Auto-process the captured image
       await autoProcessImage(captured)
     }
   }, [isScanning, capturedImage, initCamera, captureImage, stopCamera, autoProcessImage, showStatusMessage])
 
-  // Handle file upload - now auto-processes
+  // Handle file upload
   const handleFileUpload = useCallback(
     (event: React.ChangeEvent<HTMLInputElement>) => {
       const file = event.target.files?.[0]
@@ -520,8 +690,6 @@ export default function ScanComponent() {
         vibrate(100)
         speak("Image uploaded successfully. Processing...")
         showStatusMessage("Image uploaded successfully! Processing...", "success")
-
-        // Auto-process the uploaded image
         await autoProcessImage(result)
       }
       reader.readAsDataURL(file)
@@ -529,7 +697,7 @@ export default function ScanComponent() {
     [stopCamera, vibrate, speak, showStatusMessage, autoProcessImage],
   )
 
-  // Reset scan - stays on current step
+  // Reset scan
   const resetScan = useCallback(() => {
     setCapturedImage(null)
     setOcrResult(null)
@@ -546,7 +714,6 @@ export default function ScanComponent() {
       vibrate([100, 50, 100])
       speak(`Moving to step ${currentStep + 2}: ${scanSteps[currentStep + 1].title}`)
     } else {
-      // Show manual entry form
       setShowManualEntry(true)
       speak("Please enter the product information manually.")
     }
@@ -559,12 +726,7 @@ export default function ScanComponent() {
       return
     }
 
-    const manualProduct = {
-      ...createManualProduct(),
-      _scanMethod: "manual",
-      _scannedAt: new Date().toISOString(),
-    }
-
+    const manualProduct = createManualProduct()
     redirectToAnalysis(manualProduct)
   }
 
@@ -624,28 +786,24 @@ export default function ScanComponent() {
               className="fixed inset-0 bg-gradient-to-br from-orange-500/95 via-yellow-500/95 to-lime-500/95 flex items-center justify-center z-50 backdrop-blur-sm"
             >
               <div className="text-center text-white max-w-sm mx-auto px-6">
-                {/* Animated Food Scanner Icon */}
                 <motion.div
                   className="relative w-28 h-28 mx-auto mb-8"
                   initial={{ scale: 0.5, opacity: 0 }}
                   animate={{ scale: 1, opacity: 1 }}
                   transition={{ duration: 0.6, ease: "easeOut" }}
                 >
-                  {/* Outer Ring */}
                   <motion.div
                     className="absolute inset-0 border-4 border-white/20 rounded-full"
                     animate={{ scale: [1, 1.3, 1], opacity: [0.3, 0.1, 0.3] }}
                     transition={{ duration: 2, repeat: Infinity }}
                   />
 
-                  {/* Inner Ring */}
                   <motion.div
                     className="absolute inset-3 border-3 border-white/40 rounded-full"
                     animate={{ rotate: 360 }}
                     transition={{ duration: 4, repeat: Infinity, ease: "linear" }}
                   />
 
-                  {/* Center Icon */}
                   <div className="absolute inset-0 flex items-center justify-center">
                     <motion.div
                       className="w-12 h-12 bg-white/20 rounded-full flex items-center justify-center"
@@ -656,7 +814,6 @@ export default function ScanComponent() {
                     </motion.div>
                   </div>
 
-                  {/* Scanning Lines */}
                   <motion.div
                     className="absolute inset-0"
                     initial={{ opacity: 0 }}
@@ -667,7 +824,6 @@ export default function ScanComponent() {
                     <div className="absolute top-0 bottom-0 left-1/2 w-0.5 bg-white/60 transform -translate-x-1/2" />
                   </motion.div>
 
-                  {/* Animated Dots */}
                   {[...Array(6)].map((_, i) => (
                     <motion.div
                       key={i}
@@ -689,7 +845,6 @@ export default function ScanComponent() {
                   ))}
                 </motion.div>
 
-                {/* Text Animation */}
                 <motion.div
                   initial={{ y: 30, opacity: 0 }}
                   animate={{ y: 0, opacity: 1 }}
@@ -711,7 +866,6 @@ export default function ScanComponent() {
                     Preparing nutritional insights...
                   </motion.p>
 
-                  {/* Progress Bar */}
                   <div className="w-48 h-1 bg-white/20 rounded-full mx-auto mb-4 overflow-hidden">
                     <motion.div
                       className="h-full bg-white rounded-full"
@@ -721,7 +875,6 @@ export default function ScanComponent() {
                     />
                   </div>
 
-                  {/* Progress Dots */}
                   <div className="flex justify-center space-x-2">
                     {[0, 1, 2].map((i) => (
                       <motion.div
@@ -905,7 +1058,6 @@ export default function ScanComponent() {
         >
           {scanSteps.map((step, index) => (
             <div key={step.id} className="flex flex-col items-center relative">
-              {/* Connection Line */}
               {index < scanSteps.length - 1 && (
                 <div
                   className={`absolute top-4 sm:top-6 left-6 sm:left-8 w-12 sm:w-16 h-0.5 transition-colors duration-500 ${
@@ -914,7 +1066,6 @@ export default function ScanComponent() {
                 />
               )}
 
-              {/* Step Circle */}
               <motion.div
                 className={`relative w-8 h-8 sm:w-12 sm:h-12 rounded-full flex items-center justify-center shadow-lg transition-all duration-500 cursor-pointer ${
                   currentStep >= index ? `bg-gradient-to-r ${step.color} text-white` : "bg-gray-200 text-gray-500"
@@ -931,7 +1082,6 @@ export default function ScanComponent() {
               >
                 {currentStep > index ? <Check className="w-4 h-4 sm:w-6 sm:h-6" /> : step.icon}
 
-                {/* Tooltip */}
                 <AnimatePresence>
                   {showTooltip === index && (
                     <motion.div
@@ -947,7 +1097,6 @@ export default function ScanComponent() {
                 </AnimatePresence>
               </motion.div>
 
-              {/* Step Label */}
               <span
                 className={`text-xs mt-1 sm:mt-2 font-medium transition-colors duration-300 text-center ${
                   currentStep >= index ? "text-orange-600" : "text-gray-500"
@@ -977,9 +1126,7 @@ export default function ScanComponent() {
         <Card className="mb-4 sm:mb-6 overflow-hidden shadow-2xl bg-white border-0 rounded-3xl">
           <CardContent className="p-0">
             <div className="relative bg-gradient-to-br from-gray-900 via-gray-800 to-black">
-              {/* Responsive aspect ratio container */}
               <div className="relative aspect-[4/5] sm:aspect-[3/4] lg:aspect-[4/5]">
-                {/* Video Preview */}
                 <video
                   ref={videoRef}
                   autoPlay
@@ -990,7 +1137,6 @@ export default function ScanComponent() {
                   }`}
                 />
 
-                {/* Captured Image - Perfect alignment */}
                 {capturedImage && (
                   <motion.div
                     className="absolute inset-0 flex items-center justify-center bg-black rounded-3xl overflow-hidden"
@@ -1012,7 +1158,6 @@ export default function ScanComponent() {
                   </motion.div>
                 )}
 
-                {/* Camera Icon Placeholder */}
                 {!isScanning && !capturedImage && (
                   <motion.div
                     className="absolute inset-0 flex flex-col items-center justify-center text-gray-400 bg-gradient-to-br from-gray-100 to-gray-200 rounded-3xl"
@@ -1028,11 +1173,8 @@ export default function ScanComponent() {
                   </motion.div>
                 )}
 
-                {/* Modern Scan Overlay */}
                 <div className="absolute inset-0 pointer-events-none">
-                  {/* Scan Frame with modern design */}
                   <div className="absolute inset-4 sm:inset-6">
-                    {/* Corner Indicators with glow effect */}
                     <div className="absolute -top-1 -left-1 w-6 h-6 sm:w-8 sm:h-8">
                       <div className="w-full h-full border-t-4 border-l-4 border-orange-500 rounded-tl-2xl shadow-lg shadow-orange-500/50" />
                     </div>
@@ -1046,7 +1188,6 @@ export default function ScanComponent() {
                       <div className="w-full h-full border-b-4 border-r-4 border-orange-500 rounded-br-2xl shadow-lg shadow-orange-500/50" />
                     </div>
 
-                    {/* Animated Scan Line with glow */}
                     <AnimatePresence>
                       {(isScanning || scanAnimation) && (
                         <motion.div
@@ -1064,7 +1205,6 @@ export default function ScanComponent() {
                     </AnimatePresence>
                   </div>
 
-                  {/* Processing Overlay with modern design */}
                   <AnimatePresence>
                     {isProcessing && (
                       <motion.div
@@ -1080,14 +1220,13 @@ export default function ScanComponent() {
                             transition={{ duration: 1, repeat: Number.POSITIVE_INFINITY, ease: "linear" }}
                           />
                           <p className="text-sm sm:text-base font-semibold mb-1">Processing Scan</p>
-                          <p className="text-xs sm:text-sm text-white/80">Analyzing image...</p>
+                          <p className="text-xs sm:text-sm text-white/80">Analyzing with advanced detection...</p>
                         </div>
                       </motion.div>
                     )}
                   </AnimatePresence>
                 </div>
 
-                {/* Status Indicator */}
                 <div className="absolute top-4 left-4 right-4">
                   <div className="flex justify-center">
                     <div className="bg-black/50 backdrop-blur-sm text-white text-xs sm:text-sm px-3 py-1.5 rounded-full border border-white/20">
@@ -1096,7 +1235,6 @@ export default function ScanComponent() {
                   </div>
                 </div>
 
-                {/* Instruction Text */}
                 <div className="absolute bottom-4 left-4 right-4">
                   <div className="text-center">
                     <div className="bg-black/50 backdrop-blur-sm text-white text-xs sm:text-sm px-4 py-2 rounded-full border border-white/20 inline-block">
@@ -1216,12 +1354,20 @@ export default function ScanComponent() {
                     </pre>
                   </div>
 
-                  {ocrResult.confidence && (
-                    <div className="mt-4 flex items-center text-xs sm:text-sm text-green-600">
-                      <AlertCircle className="w-3 h-3 sm:w-4 sm:h-4 mr-2" />
-                      Confidence: {Math.round(ocrResult.confidence * 100)}%
-                    </div>
-                  )}
+                  <div className="mt-4 space-y-2">
+                    {ocrResult.confidence !== undefined && (
+                      <div className="flex items-center text-xs sm:text-sm text-green-600">
+                        <AlertCircle className="w-3 h-3 sm:w-4 sm:h-4 mr-2" />
+                        Confidence: {Math.round(ocrResult.confidence * 100)}%
+                      </div>
+                    )}
+                    {ocrResult.method && (
+                      <div className="flex items-center text-xs sm:text-sm text-green-600">
+                        <Check className="w-3 h-3 sm:w-4 sm:h-4 mr-2" />
+                        Method: {ocrResult.method}
+                      </div>
+                    )}
+                  </div>
                 </CardContent>
               </Card>
             </motion.div>

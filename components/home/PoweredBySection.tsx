@@ -18,7 +18,7 @@ export default function PoweredBySection({ isDarkMode }: PoweredBySectionProps) 
       stats: "2M+ Products",
     },
     {
-      name: "GroqAI",
+      name: "GEMINI AI",
       description: "Lightning-fast AI analysis",
       icon: Zap,
       color: "from-purple-500 to-violet-500",

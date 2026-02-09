@@ -762,7 +762,7 @@ export default function LandingPage() {
                 <div className="w-12 h-12 sm:w-14 sm:h-14 md:w-16 md:h-16 bg-gradient-to-r from-yellow-500 to-lime-500 rounded-full flex items-center justify-center mb-3 sm:mb-4">
                   <Zap className="w-6 h-6 sm:w-7 sm:h-7 md:w-8 md:h-8 text-white" />
                 </div>
-                <span className="font-semibold text-gray-800 text-sm sm:text-base">AI by GroqAI</span>
+                <span className="font-semibold text-gray-800 text-sm sm:text-base">AI by GEMINI-3</span>
                 <span className="text-xs sm:text-sm text-gray-600">Advanced analysis engine</span>
               </div>
               <div className="flex flex-col items-center">

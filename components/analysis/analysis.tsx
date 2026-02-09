@@ -1,3 +1,4 @@
+
 "use client"
 import { useState, useEffect, useRef, useCallback } from "react"
 import { motion, AnimatePresence } from "framer-motion"
@@ -15,10 +16,22 @@ import {
   Pause,
   CheckCircle,
   XCircle,
+  Lightbulb,
+  MessageCircle,
+  Send,
+  Sparkles,
+  Globe,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent } from "@/components/ui/card"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import Link from "next/link"
 
 interface Product {
@@ -104,21 +117,81 @@ interface HistoryItem {
   safeNutrients: string[]
 }
 
+// AI Analysis Response Interface
+interface AIAnalysisData {
+  ingredientAnalysis: IngredientAnalysis[]
+  dietaryPreferences: DietaryPreference[]
+  audioSummary: string
+  healthScore: number
+  warnings: string[]
+  benefits: string[]
+  scoreExplanation?: string[]
+  personalizedInsights?: {
+    comparisonToHistory: string
+    trendAnalysis: string
+    smartRecommendation: string
+  }
+  alternatives?: string[]
+  dailyConsumptionAdvice?: string
+  hiddenConcerns?: string[]
+  nutritionalInsights?: string[]
+  translations?: Record<string, string>
+}
+
+// Updated Chat Message Types - EMPATHETIC STRUCTURE
+interface GeminiChatResponse {
+  tone: "empathetic" | "cautionary" | "encouraging" | "neutral"
+  opening: string
+  mainAnswer: string
+  keyPoints?: string[]
+  practicalTip?: string
+  followUp?: string
+}
+
+type ChatMessage =
+  | { role: "user"; content: string; timestamp: number }
+  | { role: "assistant"; content: GeminiChatResponse; timestamp: number }
+
+// Language options
+const POPULAR_LANGUAGES = [
+  { code: "en", label: "English", flag: "🇬🇧" },
+  { code: "hi", label: "हिंदी", flag: "🇮🇳" },
+  { code: "es", label: "Español", flag: "🇪🇸" },
+  { code: "fr", label: "Français", flag: "🇫🇷" },
+  { code: "de", label: "Deutsch", flag: "🇩🇪" },
+  { code: "zh", label: "中文", flag: "🇨🇳" },
+  { code: "ja", label: "日本語", flag: "🇯🇵" },
+  { code: "ar", label: "العربية", flag: "🇸🇦" },
+]
+
 export default function AnalysisComponent() {
   const [isInitialLoading, setIsInitialLoading] = useState(true)
   const [product, setProduct] = useState<Product | null>(null)
   const [servingSize, setServingSize] = useState<string>("")
   const [servingMultiplier, setServingMultiplier] = useState(1)
   const [showAudioPlayer, setShowAudioPlayer] = useState(false)
-  const [ingredientAnalysis, setIngredientAnalysis] = useState<IngredientAnalysis[]>([])
-  const [dietaryPreferences, setDietaryPreferences] = useState<DietaryPreference[]>([])
-  const [isAnalyzing, setIsAnalyzing] = useState(false)
-  const [audioTranscript, setAudioTranscript] = useState("")
+  const [selectedLanguage, setSelectedLanguage] = useState("en")
 
-  // Replace the audio ref and related state
+  // AI Analysis State
+  const [aiAnalysis, setAiAnalysis] = useState<AIAnalysisData | null>(null)
+  const [aiLoading, setAiLoading] = useState(false)
+  const [aiError, setAiError] = useState<string | null>(null)
+
+  // Audio State
   const [isSpeaking, setIsSpeaking] = useState(false)
   const [speechProgress, setSpeechProgress] = useState(0)
-  const speechRef = useRef<SpeechSynthesisUtterance | null>(null)
+  const isSpeakingRef = useRef(false)
+  const progressIntervalRef = useRef<NodeJS.Timeout | null>(null)
+
+  // Chat State
+  const [showChat, setShowChat] = useState(false)
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
+  const [chatInput, setChatInput] = useState("")
+  const [chatLoading, setChatLoading] = useState(false)
+  const chatEndRef = useRef<HTMLDivElement>(null)
+
+  // AI Analysis Guard
+  const hasAnalyzedRef = useRef(false)
 
   const nutrients: NutrientInfo[] = [
     { key: "energy-kcal_100g", label: "Calories", unit: "kcal" },
@@ -132,7 +205,165 @@ export default function AnalysisComponent() {
     { key: "sodium_100g", label: "Sodium", unit: "mg", dangerLimit: 2.3 },
   ]
 
-  // Utility functions for history saving
+  // Load saved language preference
+  useEffect(() => {
+    const saved = localStorage.getItem("analysisLang")
+    if (saved) setSelectedLanguage(saved)
+  }, [])
+
+  // Save language preference
+  useEffect(() => {
+    localStorage.setItem("analysisLang", selectedLanguage)
+  }, [selectedLanguage])
+
+  // Scroll chat to bottom
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" })
+  }, [chatMessages])
+
+  // Gemini AI Analysis Function
+  async function runGeminiAnalysis(productData: Product) {
+    setAiLoading(true)
+    setAiError(null)
+
+    try {
+      // Get scan history from localStorage
+      const scanHistory = JSON.parse(localStorage.getItem("scanHistory") || "[]")
+
+      const res = await fetch("/api/gemini/analyze-product", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productName: productData.product_name,
+          brand: productData.brands,
+          ingredients: productData.ingredients_text,
+          nutriments: productData.nutriments,
+          scanHistory: scanHistory.slice(0, 10), // Send last 10 scans
+        }),
+      })
+
+      const json = await res.json()
+
+      if (!json.success) {
+        throw new Error(json.error || "Gemini AI analysis failed")
+      }
+
+      // Defensive validation
+      const validatedData: AIAnalysisData = {
+        ...json.data,
+        ingredientAnalysis: (json.data.ingredientAnalysis || []).map((item: any) => ({
+          ingredient: item.ingredient || "Unknown",
+          status: ["good", "moderate", "bad"].includes(item.status) ? item.status : "moderate",
+          reason: item.reason || "No analysis available",
+        })),
+        dietaryPreferences: (json.data.dietaryPreferences || []).map((pref: any) => ({
+          name: pref.name || "Unknown",
+          icon: pref.icon || "❓",
+          found: Boolean(pref.found),
+          reason: pref.reason || "",
+        })),
+        healthScore: typeof json.data.healthScore === "number" 
+          ? Math.max(0, Math.min(100, json.data.healthScore))
+          : 50,
+        warnings: Array.isArray(json.data.warnings) ? json.data.warnings : [],
+        benefits: Array.isArray(json.data.benefits) ? json.data.benefits : [],
+        audioSummary: json.data.audioSummary || "Analysis complete.",
+        scoreExplanation: Array.isArray(json.data.scoreExplanation) ? json.data.scoreExplanation : [],
+        personalizedInsights: json.data.personalizedInsights,
+        alternatives: json.data.alternatives,
+        dailyConsumptionAdvice: json.data.dailyConsumptionAdvice,
+        hiddenConcerns: json.data.hiddenConcerns,
+        nutritionalInsights: Array.isArray(json.data.nutritionalInsights) ? json.data.nutritionalInsights : [],
+        translations: json.data.translations || {},
+      }
+
+      setAiAnalysis(validatedData)
+      console.log("✅ Gemini AI analysis complete:", validatedData)
+    } catch (err: any) {
+      console.error("❌ Gemini AI error:", err)
+      setAiError(err.message || "Failed to analyze product. Please try again.")
+    } finally {
+      setAiLoading(false)
+    }
+  }
+
+  // FIXED: Chat with Gemini - Now with proper conversation history
+  async function sendChatMessage(message: string) {
+    if (!message.trim() || !product || !aiAnalysis) return
+
+    const userMessage: ChatMessage = {
+      role: "user",
+      content: message,
+      timestamp: Date.now(),
+    }
+
+    // Build history BEFORE updating state
+    const currentHistory = [...chatMessages, userMessage].slice(-6)
+
+    setChatMessages((prev) => [...prev, userMessage])
+    setChatInput("")
+    setChatLoading(true)
+
+    try {
+      const res = await fetch("/api/gemini/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productName: product.product_name,
+          ingredients: product.ingredients_text,
+          healthScore: aiAnalysis.healthScore,
+          userMessage: message,
+          conversationHistory: currentHistory, // FIXED: Use pre-built history
+        }),
+      })
+
+      const json = await res.json()
+
+      if (!json.success) {
+        throw new Error(json.error || "Chat failed")
+      }
+
+      // Validate response structure
+      const validatedResponse: GeminiChatResponse = {
+        tone: json.data.tone || "neutral",
+        opening: json.data.opening || "Let me help you with that.",
+        mainAnswer: json.data.mainAnswer || json.data.summary || "I'm not sure about that.",
+        keyPoints: Array.isArray(json.data.keyPoints) ? json.data.keyPoints : [],
+        practicalTip: json.data.practicalTip || json.data.recommendation,
+        followUp: json.data.followUp,
+      }
+
+      const assistantMessage: ChatMessage = {
+        role: "assistant",
+        content: validatedResponse,
+        timestamp: Date.now(),
+      }
+
+      setChatMessages((prev) => [...prev, assistantMessage])
+    } catch (err: any) {
+      console.error("❌ Chat error:", err)
+      // Empathetic error message
+      const errorMessage: ChatMessage = {
+        role: "assistant",
+        content: {
+          tone: "empathetic",
+          opening: "I apologize for the technical hiccup.",
+          mainAnswer: "I'm having trouble processing your question right now. This could be due to a temporary connection issue.",
+          keyPoints: [
+            "Your question was received, but I couldn't generate a proper response",
+            "Please try rephrasing or asking again in a moment"
+          ],
+          practicalTip: "If this continues, try refreshing the page or checking your internet connection.",
+        },
+        timestamp: Date.now(),
+      }
+      setChatMessages((prev) => [...prev, errorMessage])
+    } finally {
+      setChatLoading(false)
+    }
+  }
+
+  // Utility functions
   const determineCategory = (product: Product): string => {
     const name = product.product_name?.toLowerCase() || ""
     const brands = product.brands?.toLowerCase() || ""
@@ -157,44 +388,6 @@ export default function AnalysisComponent() {
     }
   }
 
-  const calculateHealthScore = (product: Product): number => {
-    const nutriments = product.nutriments || {}
-    let score = 100
-
-    // Deduct points for high calories
-    const calories = nutriments["energy-kcal_100g"] || 0
-    if (calories > 400) score -= 20
-    else if (calories > 250) score -= 10
-
-    // Deduct points for high sugar
-    const sugar = nutriments.sugars_100g || 0
-    if (sugar > 15) score -= 25
-    else if (sugar > 10) score -= 15
-    else if (sugar > 5) score -= 5
-
-    // Deduct points for high sodium
-    const sodium = (nutriments.sodium_100g || 0) * 1000 // Convert to mg
-    if (sodium > 600) score -= 20
-    else if (sodium > 400) score -= 10
-
-    // Deduct points for high saturated fat
-    const satFat = nutriments["saturated-fat_100g"] || 0
-    if (satFat > 5) score -= 15
-    else if (satFat > 3) score -= 8
-
-    // Add points for fiber
-    const fiber = nutriments.fiber_100g || 0
-    if (fiber > 5) score += 10
-    else if (fiber > 3) score += 5
-
-    // Add points for protein
-    const protein = nutriments.proteins_100g || 0
-    if (protein > 10) score += 10
-    else if (protein > 5) score += 5
-
-    return Math.max(0, Math.min(100, score))
-  }
-
   const determineNutritionGrade = (healthScore: number): "A" | "B" | "C" | "D" | "E" => {
     if (healthScore >= 80) return "A"
     if (healthScore >= 65) return "B"
@@ -203,70 +396,32 @@ export default function AnalysisComponent() {
     return "E"
   }
 
-  // Enhanced function to calculate nutrition grade from multiple sources
-  const calculateNutritionGrade = (product: Product): "A" | "B" | "C" | "D" | "E" => {
-    // First, try to get grade from OpenFoodFacts nutrition_grades_tags
+  const calculateNutritionGrade = (product: Product, aiHealthScore?: number): "A" | "B" | "C" | "D" | "E" => {
     if (product.nutrition_grades_tags && product.nutrition_grades_tags.length > 0) {
       const gradeTag = product.nutrition_grades_tags[0]
-      // Extract grade from tags like "en:a", "en:b", etc.
       const gradeMatch = gradeTag.match(/[a-e]/i)
       if (gradeMatch) {
         const grade = gradeMatch[0].toUpperCase() as "A" | "B" | "C" | "D" | "E"
-        // Validate it's a proper grade
         if (["A", "B", "C", "D", "E"].includes(grade)) {
           return grade
         }
       }
     }
 
-    // If no valid grade from OpenFoodFacts, calculate our own based on health score
-    const healthScore = calculateHealthScore(product)
-    return determineNutritionGrade(healthScore)
+    if (aiHealthScore !== undefined && aiHealthScore !== null) {
+      return determineNutritionGrade(aiHealthScore)
+    }
+
+    return "C"
   }
 
-  const generateWarningsAndBenefits = (product: Product) => {
-    const nutriments = product.nutriments || {}
-    const warnings: string[] = []
-    const benefits: string[] = []
-
-    // Check for warnings
-    const sugar = nutriments.sugars_100g || 0
-    if (sugar > 15) warnings.push("Very high sugar content")
-    else if (sugar > 10) warnings.push("High sugar content")
-
-    const sodium = (nutriments.sodium_100g || 0) * 1000
-    if (sodium > 600) warnings.push("Very high sodium")
-    else if (sodium > 400) warnings.push("High sodium")
-
-    const calories = nutriments["energy-kcal_100g"] || 0
-    if (calories > 400) warnings.push("High calorie content")
-
-    const satFat = nutriments["saturated-fat_100g"] || 0
-    if (satFat > 5) warnings.push("High saturated fat")
-
-    // Check for benefits
-    const fiber = nutriments.fiber_100g || 0
-    if (fiber > 5) benefits.push("High fiber content")
-    else if (fiber > 3) benefits.push("Good source of fiber")
-
-    const protein = nutriments.proteins_100g || 0
-    if (protein > 10) benefits.push("High protein content")
-    else if (protein > 5) benefits.push("Good source of protein")
-
-    if (calories < 100) benefits.push("Low calorie")
-    if (sugar < 5) benefits.push("Low sugar")
-    if (sodium < 200) benefits.push("Low sodium")
-
-    return { warnings, benefits }
-  }
-
-  // Save complete analysis to history - FIXED VERSION
   const saveCompleteAnalysisToHistory = useCallback(() => {
-    if (!product) return
+    if (!product || !aiAnalysis) return
 
-    const healthScore = calculateHealthScore(product)
-    const nutritionGrade = calculateNutritionGrade(product) // Use the enhanced function
-    const { warnings, benefits } = generateWarningsAndBenefits(product)
+    const healthScore = aiAnalysis.healthScore
+    const nutritionGrade = calculateNutritionGrade(product, healthScore)
+    const warnings = aiAnalysis.warnings
+    const benefits = aiAnalysis.benefits
     const category = determineCategory(product)
     const scanMethod = product._scanMethod || "search"
 
@@ -285,7 +440,7 @@ export default function AnalysisComponent() {
       fat: Math.round((product.nutriments?.fat_100g || 0) * 10) / 10,
       carbs: Math.round((product.nutriments?.carbohydrates_100g || 0) * 10) / 10,
       sugar: Math.round((product.nutriments?.sugars_100g || 0) * 10) / 10,
-      sodium: Math.round((product.nutriments?.sodium_100g || 0) * 1000), // Convert to mg
+      sodium: Math.round((product.nutriments?.sodium_100g || 0) * 1000),
       fiber: Math.round((product.nutriments?.fiber_100g || 0) * 10) / 10,
       saturatedFat: Math.round((product.nutriments?.["saturated-fat_100g"] || 0) * 10) / 10,
       tags: [
@@ -302,11 +457,9 @@ export default function AnalysisComponent() {
       warnings,
       benefits,
       barcode: product.code || undefined,
-      // Complete nutriments data
       nutriments: product.nutriments || {},
-      // Analysis data
-      ingredientAnalysis: ingredientAnalysis,
-      dietaryPreferences: dietaryPreferences,
+      ingredientAnalysis: aiAnalysis.ingredientAnalysis,
+      dietaryPreferences: aiAnalysis.dietaryPreferences,
       dangerousNutrients: nutrients
         .filter((nutrient) => isDangerous(nutrient, product.nutriments?.[nutrient.key]))
         .map((n) => n.key),
@@ -315,44 +468,35 @@ export default function AnalysisComponent() {
         .map((n) => n.key),
     }
 
-    // Get existing history
     const existingHistory = JSON.parse(localStorage.getItem("scanHistory") || "[]")
-
-    // Check if this product was recently added (within 10 minutes) to avoid duplicates
-    const recentTimeThreshold = Date.now() - 10 * 60 * 1000 // 10 minutes ago
+    const recentTimeThreshold = Date.now() - 10 * 60 * 1000
     const existingIndex = existingHistory.findIndex(
       (item: HistoryItem) =>
         item.productName === analysisData.productName && new Date(item.scannedAt).getTime() > recentTimeThreshold,
     )
 
     if (existingIndex !== -1) {
-      // Update existing item with complete analysis
       existingHistory[existingIndex] = {
         ...existingHistory[existingIndex],
         ...analysisData,
-        id: existingHistory[existingIndex].id, // Keep original ID
-        scannedAt: existingHistory[existingIndex].scannedAt, // Keep original scan time
+        id: existingHistory[existingIndex].id,
+        scannedAt: existingHistory[existingIndex].scannedAt,
       }
-      console.log("Updated existing history item with complete analysis:", analysisData.productName)
+      console.log("📝 Updated existing history item with AI analysis:", analysisData.productName)
     } else {
-      // Add new item to beginning of array
       existingHistory.unshift(analysisData)
-      console.log("Added new complete analysis to history:", analysisData.productName)
+      console.log("📝 Added new AI analysis to history:", analysisData.productName)
     }
 
-    // Keep only last 100 items
     const updatedHistory = existingHistory.slice(0, 100)
     localStorage.setItem("scanHistory", JSON.stringify(updatedHistory))
-
-    // Also save to recentAnalysisResult for real-time updates
     localStorage.setItem("recentAnalysisResult", JSON.stringify(analysisData))
 
-    console.log("Complete analysis data saved to history for:", product.product_name)
-  }, [product, ingredientAnalysis, dietaryPreferences, nutrients])
+    console.log("💾 Complete AI analysis data saved to history for:", product.product_name)
+  }, [product, aiAnalysis, nutrients])
 
-  // Load product data on component mount
+  // Load product data
   useEffect(() => {
-    // Check for redirection flag immediately on client-side mount
     const selectedProduct = localStorage.getItem("selectedProduct")
     const isRedirecting = localStorage.getItem("isRedirecting")
 
@@ -360,33 +504,23 @@ export default function AnalysisComponent() {
       try {
         const productData = JSON.parse(selectedProduct)
 
-        // Show loading animation if coming from redirection
         if (isRedirecting) {
           setIsInitialLoading(true)
-          // Reduced delay for smoother transition
           setTimeout(() => {
             setProduct(productData)
             setIsInitialLoading(false)
             localStorage.removeItem("selectedProduct")
             localStorage.removeItem("isRedirecting")
-            generateAudioSummary(productData)
-            console.log(
-              "Product loaded for analysis:",
-              productData.product_name,
-              "Scan method:",
-              productData._scanMethod,
-            )
-          }, 600) // Reduced from 1200ms to 600ms
+            console.log("📦 Product loaded for AI analysis:", productData.product_name)
+          }, 600)
         } else {
-          // Direct access, load immediately
           setProduct(productData)
           setIsInitialLoading(false)
           localStorage.removeItem("selectedProduct")
-          generateAudioSummary(productData)
-          console.log("Product loaded for analysis:", productData.product_name, "Scan method:", productData._scanMethod)
+          console.log("📦 Product loaded for AI analysis:", productData.product_name)
         }
       } catch (error) {
-        console.error("Error parsing product data:", error)
+        console.error("❌ Error parsing product data:", error)
         setIsInitialLoading(false)
       }
     } else {
@@ -394,511 +528,37 @@ export default function AnalysisComponent() {
     }
   }, [])
 
-  // Analyze ingredients when product changes
+  // Trigger AI analysis
   useEffect(() => {
-    if (product?.ingredients_text) {
-      analyzeIngredients(product.ingredients_text)
-      analyzeDietaryPreferences(product.ingredients_text)
-    }
+    if (!product || !product.ingredients_text) return
+    if (hasAnalyzedRef.current) return
+
+    hasAnalyzedRef.current = true
+    console.log("🤖 Triggering Gemini AI analysis...")
+    runGeminiAnalysis(product)
   }, [product])
 
-  // Save analysis when complete - FIXED TRIGGER
+  // Save analysis
   useEffect(() => {
-    // Only save when we have product and analysis is complete
-    if (product && ingredientAnalysis.length > 0 && dietaryPreferences.length > 0 && !isAnalyzing) {
-      // Small delay to ensure all analysis is complete
+    if (product && aiAnalysis && !aiLoading) {
       const timer = setTimeout(() => {
         saveCompleteAnalysisToHistory()
       }, 500)
 
       return () => clearTimeout(timer)
     }
-  }, [product, ingredientAnalysis, dietaryPreferences, isAnalyzing, saveCompleteAnalysisToHistory])
+  }, [product, aiAnalysis, aiLoading, saveCompleteAnalysisToHistory])
 
-  // Handle serving size changes
   const handleServingSizeChange = useCallback((value: string) => {
     setServingSize(value)
     const numValue = Number.parseFloat(value)
     if (!isNaN(numValue) && numValue > 0) {
-      setServingMultiplier(numValue / 100) // Assuming base values are per 100g
+      setServingMultiplier(numValue / 100)
     } else {
       setServingMultiplier(1)
     }
   }, [])
 
-  // Generate audio summary
-  const generateAudioSummary = useCallback(
-    async (productData: Product) => {
-      const grade = calculateNutritionGrade(productData) // Use the enhanced function
-      const calories = Math.round(productData.nutriments?.["energy-kcal_100g"] || 0)
-      const protein = Math.round((productData.nutriments?.proteins_100g || 0) * 10) / 10
-      const sugar = Math.round((productData.nutriments?.sugars_100g || 0) * 10) / 10
-      const sodium = Math.round((productData.nutriments?.sodium_100g || 0) * 1000)
-
-      const dangerousNutrients = nutrients.filter((nutrient) =>
-        isDangerous(nutrient, productData.nutriments?.[nutrient.key]),
-      )
-
-      const summary = `Analysis complete for ${productData.product_name || "this product"}. 
-${productData.brands ? `Brand: ${productData.brands}.` : ""} 
-This product has a nutrition grade of ${grade}. 
-Nutritional information per 100 grams: ${calories} calories, ${protein} grams protein, ${sugar} grams sugar, and ${sodium} milligrams sodium.
-${dangerousNutrients.length > 0 ? `Warning: This product contains high levels of ${dangerousNutrients.map((n) => n.label).join(", ")}.` : ""}
-Complete ingredient analysis and dietary compatibility information are now available for review.`
-
-      setAudioTranscript(summary)
-    },
-    [nutrients],
-  )
-
-  // Analyze ingredients using intelligent analysis
-  const analyzeIngredients = useCallback(async (ingredientsText: string) => {
-    setIsAnalyzing(true)
-    try {
-      // Simulate API processing time
-      await new Promise((resolve) => setTimeout(resolve, 1500))
-
-      // Split ingredients and clean them - ANALYZE ALL INGREDIENTS
-      const ingredients = ingredientsText
-        .split(/[,;]/)
-        .map((ingredient) => ingredient.trim())
-        .filter((ingredient) => ingredient.length > 0)
-      // Remove the slice limit to analyze ALL ingredients
-
-      const analysisResults: IngredientAnalysis[] = ingredients.map((ingredient) => {
-        const lowerIngredient = ingredient.toLowerCase()
-
-        // Define ingredient categories and their analysis
-        const ingredientAnalysis = analyzeIndividualIngredient(lowerIngredient, ingredient)
-
-        return ingredientAnalysis
-      })
-
-      // Sort results: good first, then moderate, then bad for better UX
-      const sortedResults = analysisResults.sort((a, b) => {
-        const statusOrder = { good: 0, moderate: 1, bad: 2 }
-        return statusOrder[a.status] - statusOrder[b.status]
-      })
-
-      setIngredientAnalysis(sortedResults)
-      console.log("Ingredient analysis complete:", sortedResults.length, "ingredients analyzed")
-    } catch (error) {
-      console.error("Error analyzing ingredients:", error)
-      // Fallback analysis if something goes wrong
-      const fallbackAnalysis: IngredientAnalysis[] = [
-        {
-          ingredient: "Analysis Error",
-          status: "moderate",
-          reason: "Unable to analyze ingredients at this time",
-        },
-      ]
-      setIngredientAnalysis(fallbackAnalysis)
-    } finally {
-      setIsAnalyzing(false)
-    }
-  }, [])
-
-  // Helper function to analyze individual ingredients
-  const analyzeIndividualIngredient = (lowerIngredient: string, originalIngredient: string): IngredientAnalysis => {
-    // FOCUS ON LESSER-KNOWN HARMFUL INGREDIENTS FIRST
-    const dangerousHiddenIngredients = {
-      // Carcinogenic and highly toxic compounds
-      "4-methylimidazole": "Carcinogenic compound formed in caramel coloring, linked to cancer",
-      "4-mei": "Carcinogenic byproduct of caramel color manufacturing",
-      acrylamide: "Neurotoxic and carcinogenic compound, damages nervous system",
-      benzopyrene: "Highly carcinogenic compound, causes DNA damage",
-      formaldehyde: "Known carcinogen, toxic to respiratory system",
-
-      // Endocrine disruptors
-      "bisphenol a": "Endocrine disruptor, mimics estrogen, affects hormones",
-      bpa: "Hormone disruptor linked to reproductive issues and cancer",
-      phthalates: "Endocrine disruptors, affect reproductive development",
-      parabens: "Hormone disruptors that mimic estrogen",
-      propylparaben: "Endocrine disruptor, accumulates in breast tissue",
-      methylparaben: "Hormone disruptor, linked to breast cancer",
-
-      // Neurotoxic compounds
-      "aluminum sulfate": "Neurotoxin linked to Alzheimer's disease",
-      "aluminum phosphate": "Neurotoxic compound, accumulates in brain tissue",
-      "lead acetate": "Highly toxic heavy metal, causes brain damage",
-      "mercury compounds": "Neurotoxic heavy metal, damages nervous system",
-
-      // Inflammatory and allergenic compounds
-      carrageenan: "Causes severe intestinal inflammation and digestive issues",
-      "polysorbate 80": "Disrupts gut bacteria, increases intestinal permeability",
-      "polysorbate 20": "Emulsifier that damages gut lining and immune system",
-      "sodium stearoyl lactylate": "Synthetic emulsifier, causes gut inflammation",
-      datem: "Diacetyl tartaric acid esters, linked to respiratory issues",
-
-      // Genotoxic and mutagenic compounds
-      "potassium bromate": "Banned carcinogen that damages DNA and causes cancer",
-      bromate: "Genotoxic compound, causes genetic mutations",
-      azodicarbonamide: "Respiratory toxin, banned in many countries",
-      "benzoyl peroxide": "Mutagenic bleaching agent, causes DNA damage",
-
-      // Metabolic disruptors
-      "propylene glycol alginate": "Synthetic thickener, disrupts metabolism",
-      "calcium disodium edta": "Chelating agent that removes essential minerals",
-      "disodium edta": "Synthetic preservative, depletes vital minerals",
-      "tetrasodium edta": "Industrial chelator, removes calcium and magnesium",
-
-      // Liver and kidney toxins
-      "butylated hydroxytoluene": "Liver toxin, accumulates in organs",
-      "butylated hydroxyanisole": "Carcinogenic antioxidant, damages liver",
-      "tertiary butylhydroquinone": "Industrial preservative, causes liver damage",
-      ethoxyquin: "Pesticide preservative, highly toxic to liver",
-
-      // Respiratory and skin toxins
-      "sulfur dioxide": "Respiratory irritant, triggers asthma attacks",
-      "sodium metabisulfite": "Severe allergic reactions, respiratory distress",
-      "potassium metabisulfite": "Causes breathing difficulties and skin reactions",
-      "calcium sulfite": "Respiratory irritant, triggers allergic responses",
-
-      // Digestive system toxins
-      "titanium dioxide": "Nanoparticles damage intestinal lining, potential carcinogen",
-      "silicon dioxide": "Industrial additive, causes digestive inflammation",
-      "magnesium stearate": "Synthetic lubricant, impairs nutrient absorption",
-      "stearic acid": "Industrial fatty acid, disrupts digestion",
-
-      // Cardiovascular toxins
-      "sodium aluminum phosphate": "Linked to heart disease and bone disorders",
-      "aluminum sodium sulfate": "Cardiovascular toxin, affects heart rhythm",
-      "potassium aluminum sulfate": "Toxic to cardiovascular system",
-
-      // Reproductive toxins
-      "diethyl phthalate": "Reproductive toxin, affects fertility",
-      "benzyl butyl phthalate": "Developmental toxin, harms reproductive system",
-      "di-n-butyl phthalate": "Endocrine disruptor affecting reproduction",
-    }
-
-    // Check for dangerous hidden ingredients first
-    for (const [key, reason] of Object.entries(dangerousHiddenIngredients)) {
-      if (lowerIngredient.includes(key)) {
-        return {
-          ingredient: originalIngredient,
-          status: "bad",
-          reason: reason,
-        }
-      }
-    }
-
-    // Common harmful ingredients users might know
-    const commonBadIngredients = {
-      "high fructose corn syrup": "Highly processed sweetener, linked to obesity and diabetes",
-      "monosodium glutamate": "Artificial flavor enhancer, may cause headaches and nausea",
-      "sodium nitrite": "Preservative linked to cancer and cardiovascular disease",
-      "artificial colors": "Synthetic dyes linked to hyperactivity and behavioral issues",
-      "hydrogenated oil": "Trans fats that increase heart disease risk",
-      aspartame: "Artificial sweetener linked to neurological issues",
-      "sodium benzoate": "Preservative that forms carcinogenic benzene",
-    }
-
-    // Check common bad ingredients
-    for (const [key, reason] of Object.entries(commonBadIngredients)) {
-      if (lowerIngredient.includes(key)) {
-        return {
-          ingredient: originalIngredient,
-          status: "bad",
-          reason: reason,
-        }
-      }
-    }
-
-    // Moderate ingredients (processed but common)
-    const moderateIngredients = {
-      "natural flavors": "Can contain up to 100 different chemicals, often highly processed",
-      "caramel color": "May contain carcinogenic 4-methylimidazole depending on type",
-      "modified corn starch": "Heavily processed thickener, empty calories",
-      "corn syrup": "Highly processed sweetener, spikes blood sugar rapidly",
-      "palm oil": "Highly processed oil, environmental concerns, inflammatory",
-      "soybean oil": "Heavily processed, high in inflammatory omega-6 fatty acids",
-      "canola oil": "Chemically extracted oil, often from GMO crops",
-      "citric acid": "Usually synthetic, not from citrus fruits as name suggests",
-      "sodium phosphate": "Synthetic preservative, high sodium content",
-      "calcium carbonate": "Industrial chalk used as filler",
-      lecithin: "Emulsifier, often chemically extracted",
-      "xanthan gum": "Fermented sugar, generally safe but highly processed",
-      "guar gum": "Natural thickener but can cause digestive issues",
-      maltodextrin: "Highly processed carbohydrate, spikes blood sugar",
-      dextrose: "Simple sugar that rapidly increases blood glucose",
-    }
-
-    // Check moderate ingredients
-    for (const [key, reason] of Object.entries(moderateIngredients)) {
-      if (lowerIngredient.includes(key)) {
-        return {
-          ingredient: originalIngredient,
-          status: "moderate",
-          reason: reason,
-        }
-      }
-    }
-
-    // Good ingredients (natural, beneficial)
-    const goodIngredients = {
-      organic: "Certified organic, minimal processing and no synthetic pesticides",
-      water: "Essential for hydration and bodily functions",
-      "sea salt": "Natural mineral source, contains trace minerals",
-      "himalayan salt": "Natural pink salt with beneficial minerals",
-      "coconut oil": "Natural saturated fat with antimicrobial properties",
-      "olive oil": "Rich in healthy monounsaturated fats and antioxidants",
-      "avocado oil": "High in healthy fats and vitamin E",
-      butter: "Natural dairy fat, source of fat-soluble vitamins",
-      eggs: "Complete protein with all essential amino acids",
-      milk: "Natural source of calcium, protein, and vitamins",
-      honey: "Natural sweetener with antimicrobial properties",
-      "maple syrup": "Natural sweetener with minerals and antioxidants",
-      "vanilla extract": "Natural flavoring from vanilla beans",
-      "lemon juice": "Natural citrus, rich in vitamin C",
-      garlic: "Natural antimicrobial and cardiovascular benefits",
-      turmeric: "Anti-inflammatory spice with curcumin",
-      ginger: "Natural anti-inflammatory and digestive aid",
-      cinnamon: "Natural spice that helps regulate blood sugar",
-      "black pepper": "Natural spice that enhances nutrient absorption",
-      rosemary: "Natural antioxidant herb with preservative properties",
-      thyme: "Natural antimicrobial herb",
-      oregano: "Natural herb with antioxidant properties",
-      basil: "Natural herb rich in antioxidants",
-      "apple cider vinegar": "Natural fermented vinegar with probiotics",
-      "coconut flour": "Natural gluten-free flour alternative",
-      "almond flour": "Natural nut flour, high in protein and healthy fats",
-      quinoa: "Complete protein grain with all amino acids",
-      "chia seeds": "Natural source of omega-3 fatty acids and fiber",
-      "flax seeds": "Rich in omega-3s and lignans",
-      "pumpkin seeds": "Natural source of minerals and healthy fats",
-      "sunflower seeds": "Natural source of vitamin E and healthy fats",
-      cocoa: "Natural antioxidant, rich in flavonoids",
-      "green tea": "Natural antioxidant with beneficial polyphenols",
-    }
-
-    // Check for good ingredients
-    for (const [key, reason] of Object.entries(goodIngredients)) {
-      if (lowerIngredient.includes(key)) {
-        return {
-          ingredient: originalIngredient,
-          status: "good",
-          reason: reason,
-        }
-      }
-    }
-
-    // Pattern-based analysis for unknown ingredients
-    if (lowerIngredient.includes("artificial") || lowerIngredient.includes("synthetic")) {
-      return {
-        ingredient: originalIngredient,
-        status: "bad",
-        reason: "Artificial compound, potential health risks from synthetic chemicals",
-      }
-    }
-
-    if (lowerIngredient.includes("extract") && !lowerIngredient.includes("artificial")) {
-      return {
-        ingredient: originalIngredient,
-        status: "good",
-        reason: "Natural extract, concentrated beneficial compounds",
-      }
-    }
-
-    if (lowerIngredient.includes("vitamin") || lowerIngredient.includes("mineral")) {
-      return {
-        ingredient: originalIngredient,
-        status: "good",
-        reason: "Added essential nutrient, beneficial for health",
-      }
-    }
-
-    if (
-      lowerIngredient.includes("acid") &&
-      !lowerIngredient.includes("ascorbic") &&
-      !lowerIngredient.includes("citric")
-    ) {
-      return {
-        ingredient: originalIngredient,
-        status: "moderate",
-        reason: "Chemical compound, generally safe but synthetic",
-      }
-    }
-
-    if (lowerIngredient.includes("sodium") && lowerIngredient.length > 10) {
-      return {
-        ingredient: originalIngredient,
-        status: "moderate",
-        reason: "Sodium-based preservative, adds to daily sodium intake",
-      }
-    }
-
-    // Default for unknown ingredients
-    if (lowerIngredient.length > 20 || /[0-9]/.test(lowerIngredient)) {
-      return {
-        ingredient: originalIngredient,
-        status: "moderate",
-        reason: "Complex chemical name suggests industrial processing",
-      }
-    }
-
-    // If we can't classify it, assume it's a basic ingredient
-    return {
-      ingredient: originalIngredient,
-      status: "moderate",
-      reason: "Common food ingredient, likely processed",
-    }
-  }
-
-  // Analyze dietary preferences using GroqAI
-  const analyzeDietaryPreferences = useCallback(
-    async (ingredientsText: string) => {
-      try {
-        setIsAnalyzing(true)
-
-        // Prepare the analysis prompt
-        const analysisPrompt = `
-    Analyze the following food product ingredients and determine dietary compatibility:
-    
-    Product: ${product?.product_name || "Unknown Product"}
-    Brand: ${product?.brands || "Unknown Brand"}
-    Ingredients: ${ingredientsText}
-    
-    Please analyze if this product is suitable for the following dietary preferences and provide a brief reason:
-    
-    1. Vegetarian (no meat, fish, or poultry)
-    2. Vegan (no animal products including dairy, eggs, honey)
-    3. Gluten-Free (no wheat, barley, rye, or gluten-containing ingredients)
-    4. Dairy-Free (no milk, cheese, butter, or dairy derivatives)
-    5. Nut-Free (no tree nuts or peanuts)
-    6. Organic (made with organic ingredients)
-    
-    Respond in JSON format:
-    {
-      "vegetarian": {"suitable": boolean, "reason": "brief explanation"},
-      "vegan": {"suitable": boolean, "reason": "brief explanation"},
-      "glutenFree": {"suitable": boolean, "reason": "brief explanation"},
-      "dairyFree": {"suitable": boolean, "reason": "brief explanation"},
-      "nutFree": {"suitable": boolean, "reason": "brief explanation"},
-      "organic": {"suitable": boolean, "reason": "brief explanation"}
-    }
-    `
-
-        // Simulate GroqAI API call (replace with actual API call when available)
-        await new Promise((resolve) => setTimeout(resolve, 2000))
-
-        // For now, we'll do intelligent analysis based on ingredients
-        const lowerIngredients = ingredientsText.toLowerCase()
-
-        const analysisResults = {
-          vegetarian: {
-            suitable: !/(meat|beef|pork|chicken|fish|seafood|gelatin|lard|tallow)/i.test(lowerIngredients),
-            reason: /(meat|beef|pork|chicken|fish|seafood|gelatin|lard|tallow)/i.test(lowerIngredients)
-              ? "Contains animal-derived ingredients"
-              : "No meat or fish ingredients detected",
-          },
-          vegan: {
-            suitable:
-              !/(meat|beef|pork|chicken|fish|seafood|milk|dairy|cheese|butter|cream|egg|honey|gelatin|whey|casein|lactose)/i.test(
-                lowerIngredients,
-              ),
-            reason:
-              /(meat|beef|pork|chicken|fish|seafood|milk|dairy|cheese|butter|cream|egg|honey|gelatin|whey|casein|lactose)/i.test(
-                lowerIngredients,
-              )
-                ? "Contains animal products or derivatives"
-                : "No animal products detected",
-          },
-          glutenFree: {
-            suitable: !/(wheat|barley|rye|gluten|malt|flour|bread|pasta)/i.test(lowerIngredients),
-            reason: /(wheat|barley|rye|gluten|malt|flour|bread|pasta)/i.test(lowerIngredients)
-              ? "Contains gluten or gluten-containing grains"
-              : "No gluten-containing ingredients found",
-          },
-          dairyFree: {
-            suitable: !/(milk|dairy|cheese|butter|cream|whey|casein|lactose|yogurt)/i.test(lowerIngredients),
-            reason: /(milk|dairy|cheese|butter|cream|whey|casein|lactose|yogurt)/i.test(lowerIngredients)
-              ? "Contains dairy or milk derivatives"
-              : "No dairy ingredients detected",
-          },
-          nutFree: {
-            suitable: !/(almond|walnut|pecan|cashew|pistachio|hazelnut|peanut|tree nut|nut oil)/i.test(
-              lowerIngredients,
-            ),
-            reason: /(almond|walnut|pecan|cashew|pistachio|hazelnut|peanut|tree nut|nut oil)/i.test(lowerIngredients)
-              ? "Contains nuts or nut-derived ingredients"
-              : "No nuts or nut products found",
-          },
-          organic: {
-            suitable:
-              /organic/i.test(lowerIngredients) ||
-              /organic/i.test(product?.product_name || "") ||
-              /organic/i.test(product?.brands || ""),
-            reason:
-              /organic/i.test(lowerIngredients) ||
-              /organic/i.test(product?.product_name || "") ||
-              /organic/i.test(product?.brands || "")
-                ? "Product contains organic ingredients"
-                : "No organic certification or ingredients mentioned",
-          },
-        }
-
-        // Map results to the expected format
-        const preferences = [
-          {
-            name: "Vegetarian",
-            icon: "🌱",
-            found: analysisResults.vegetarian.suitable,
-            reason: analysisResults.vegetarian.reason,
-          },
-          {
-            name: "Vegan",
-            icon: "🥬",
-            found: analysisResults.vegan.suitable,
-            reason: analysisResults.vegan.reason,
-          },
-          {
-            name: "Gluten-Free",
-            icon: "🌾",
-            found: analysisResults.glutenFree.suitable,
-            reason: analysisResults.glutenFree.reason,
-          },
-          {
-            name: "Dairy-Free",
-            icon: "🥛",
-            found: analysisResults.dairyFree.suitable,
-            reason: analysisResults.dairyFree.reason,
-          },
-          {
-            name: "Nut-Free",
-            icon: "🥜",
-            found: analysisResults.nutFree.suitable,
-            reason: analysisResults.nutFree.reason,
-          },
-          {
-            name: "Organic",
-            icon: "🌿",
-            found: analysisResults.organic.suitable,
-            reason: analysisResults.organic.reason,
-          },
-        ]
-
-        setDietaryPreferences(preferences)
-        console.log("Dietary preferences analysis complete:", preferences.length, "preferences analyzed")
-      } catch (error) {
-        console.error("Error analyzing dietary preferences:", error)
-        // Fallback to basic analysis if API fails
-        const basicPreferences = [
-          { name: "Vegetarian", icon: "🌱", found: false, reason: "Analysis unavailable" },
-          { name: "Vegan", icon: "🥬", found: false, reason: "Analysis unavailable" },
-          { name: "Gluten-Free", icon: "🌾", found: false, reason: "Analysis unavailable" },
-          { name: "Dairy-Free", icon: "🥛", found: false, reason: "Analysis unavailable" },
-          { name: "Nut-Free", icon: "🥜", found: false, reason: "Analysis unavailable" },
-          { name: "Organic", icon: "🌿", found: false, reason: "Analysis unavailable" },
-        ]
-        setDietaryPreferences(basicPreferences)
-      } finally {
-        setIsAnalyzing(false)
-      }
-    },
-    [product],
-  )
-
-  // Get nutrition grade color
   const getGradeColor = (grade: string) => {
     switch (grade?.toUpperCase()) {
       case "A":
@@ -916,280 +576,178 @@ Complete ingredient analysis and dietary compatibility information are now avail
     }
   }
 
-  // Get grade position for rating bar
   const getGradePosition = (grade: string) => {
     const positions = { A: "90%", B: "75%", C: "50%", D: "25%", E: "10%" }
     return positions[grade?.toUpperCase() as keyof typeof positions] || "50%"
   }
 
-  // Calculate adjusted nutrition value
   const getAdjustedValue = (value: number | undefined) => {
     if (value === undefined) return "N/A"
     return (value * servingMultiplier).toFixed(1)
   }
 
-  // Check if nutrient is in danger zone
   const isDangerous = (nutrient: NutrientInfo, value: number | undefined) => {
     if (!nutrient.dangerLimit || value === undefined) return false
     const adjustedValue = value * servingMultiplier
     return adjustedValue > nutrient.dangerLimit
   }
 
-  // Toggle audio player
   const toggleAudioPlayer = () => {
     setShowAudioPlayer(!showAudioPlayer)
   }
 
-  // Toggle speech with better error handling and state management
-  const toggleSpeech = useCallback(() => {
+  const toggleChat = () => {
+    setShowChat(!showChat)
+  }
+
+  // FIXED: Audio playback with better fallback
+  const handlePlayAudio = useCallback(() => {
+    // Safe fallback for translated audio
+    const audioTranscript = selectedLanguage !== "en"
+      ? (aiAnalysis?.translations?.[selectedLanguage] ?? aiAnalysis?.audioSummary)
+      : aiAnalysis?.audioSummary
+
     if (!audioTranscript) {
-      console.log("No audio transcript available")
+      console.log("❌ No audio transcript available")
+      alert("Audio summary not available for this product")
       return
     }
 
-    if (isSpeaking) {
-      // Stop speech
-      try {
-        speechSynthesis.cancel()
-        setIsSpeaking(false)
-        setSpeechProgress(0)
-        console.log("Speech cancelled by user")
-      } catch (error) {
-        console.error("Error cancelling speech:", error)
-        setIsSpeaking(false)
-        setSpeechProgress(0)
+    if (isSpeakingRef.current) {
+      console.log("⏹️ Stopping current speech")
+      speechSynthesis.cancel()
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current)
+        progressIntervalRef.current = null
       }
-    } else {
-      // Start speech with improved error handling
-      if ("speechSynthesis" in window) {
-        // Ensure clean state
-        speechSynthesis.cancel()
-
-        // Wait a bit to ensure cancellation is complete
-        setTimeout(() => {
-          try {
-            const utterance = new SpeechSynthesisUtterance(audioTranscript)
-            utterance.rate = 0.8
-            utterance.pitch = 1
-            utterance.volume = 0.8
-
-            // Get available voices and set a preferred one
-            const voices = speechSynthesis.getVoices()
-            if (voices.length > 0) {
-              // Try to find an English voice, fallback to first available
-              const englishVoice = voices.find((voice) => voice.lang.startsWith("en")) || voices[0]
-              utterance.voice = englishVoice
-              console.log("Using voice:", englishVoice.name)
-            }
-
-            let progressInterval: NodeJS.Timeout | null = null
-            let hasStarted = false
-            let isCompleted = false
-
-            utterance.onstart = () => {
-              console.log("Speech started successfully")
-              hasStarted = true
-              isCompleted = false
-              setIsSpeaking(true)
-              setSpeechProgress(0)
-
-              // Estimate speech duration and update progress
-              const estimatedDuration = audioTranscript.length * 60 // ~60ms per character
-              const updateInterval = Math.max(100, estimatedDuration / 100) // Update every 100ms minimum
-
-              progressInterval = setInterval(() => {
-                setSpeechProgress((prev) => {
-                  if (prev >= 95) {
-                    return prev
-                  }
-                  return prev + 1
-                })
-              }, updateInterval)
-            }
-
-            utterance.onend = () => {
-              console.log("Speech completed successfully")
-              isCompleted = true
-              setIsSpeaking(false)
-              setSpeechProgress(100)
-              if (progressInterval) {
-                clearInterval(progressInterval)
-                progressInterval = null
-              }
-            }
-
-            utterance.onerror = (event) => {
-              // Clean up progress interval first
-              if (progressInterval) {
-                clearInterval(progressInterval)
-                progressInterval = null
-              }
-
-              // Handle different types of errors
-              if (event.error === "interrupted") {
-                // This is normal when user stops speech or starts new speech
-                console.log("Speech was interrupted - this is normal behavior")
-                setIsSpeaking(false)
-                setSpeechProgress(0)
-                // Don't show any error message for interrupted speech
-                return
-              }
-
-              // Log other errors but handle them gracefully
-              console.warn("Speech synthesis error:", event.error)
-
-              if (event.error === "network") {
-                setIsSpeaking(false)
-                setSpeechProgress(0)
-                alert("Network error occurred during speech synthesis. Please check your connection and try again.")
-              } else if (event.error === "synthesis-failed") {
-                setIsSpeaking(false)
-                setSpeechProgress(0)
-                alert("Speech synthesis failed. Please try again or check if your browser supports text-to-speech.")
-              } else if (event.error === "language-not-supported") {
-                setIsSpeaking(false)
-                setSpeechProgress(0)
-                alert("Language not supported for speech synthesis.")
-              } else if (event.error === "voice-unavailable") {
-                setIsSpeaking(false)
-                setSpeechProgress(0)
-                alert("Selected voice is unavailable. Please try again.")
-              } else {
-                // For any other errors, reset state but don't show alert if speech had started
-                setIsSpeaking(false)
-                setSpeechProgress(0)
-
-                if (!hasStarted && !isCompleted) {
-                  // Only show error if speech never started
-                  alert(`Unable to start speech synthesis. Error: ${event.error}`)
-                }
-              }
-            }
-
-            // Store reference for cleanup
-            speechRef.current = utterance
-
-            // Start speaking
-            console.log("Starting speech synthesis...")
-            speechSynthesis.speak(utterance)
-
-            // Fallback timeout in case onstart never fires
-            setTimeout(() => {
-              if (!hasStarted && !isCompleted && !isSpeaking) {
-                console.log("Speech didn't start within 3 seconds, assuming failure")
-                setIsSpeaking(false)
-                setSpeechProgress(0)
-                if (progressInterval) {
-                  clearInterval(progressInterval)
-                  progressInterval = null
-                }
-                alert("Speech synthesis failed to start. Please try again.")
-              }
-            }, 3000) // Increased to 3 seconds
-          } catch (error) {
-            console.error("Error creating or starting speech:", error)
-            setIsSpeaking(false)
-            setSpeechProgress(0)
-            alert("Unable to start speech synthesis. Please try again.")
-          }
-        }, 300) // Increased delay to 300ms for better stability
-      } else {
-        alert("Text-to-speech is not supported in your browser")
-      }
+      isSpeakingRef.current = false
+      setIsSpeaking(false)
+      setSpeechProgress(0)
+      return
     }
-  }, [audioTranscript, isSpeaking])
 
-  // Cleanup speech on unmount and modal close
-  useEffect(() => {
-    if (!showAudioPlayer && isSpeaking) {
-      console.log("Audio player closed, stopping speech")
-      try {
-        speechSynthesis.cancel()
-        setIsSpeaking(false)
-        setSpeechProgress(0)
-      } catch (error) {
-        console.warn("Error stopping speech on modal close:", error)
-        setIsSpeaking(false)
-        setSpeechProgress(0)
+    if (!("speechSynthesis" in window)) {
+      alert("Text-to-speech is not supported in your browser")
+      return
+    }
+
+    console.log("▶️ Starting speech playback in language:", selectedLanguage)
+    
+    speechSynthesis.cancel()
+
+    const utterance = new SpeechSynthesisUtterance(audioTranscript)
+    utterance.rate = 0.8
+    utterance.pitch = 1
+    utterance.volume = 0.8
+
+    // Language-aware voice mapping
+    const voices = speechSynthesis.getVoices()
+    if (voices.length > 0) {
+      const voiceMap: Record<string, (v: SpeechSynthesisVoice) => boolean> = {
+        en: (v) => v.lang.startsWith("en"),
+        hi: (v) => v.lang.startsWith("hi") || v.lang === "hi-IN",
+        fr: (v) => v.lang.startsWith("fr"),
+        es: (v) => v.lang.startsWith("es"),
+        de: (v) => v.lang.startsWith("de"),
+        ja: (v) => v.lang.startsWith("ja"),
+        zh: (v) => v.lang.startsWith("zh"),
+        ar: (v) => v.lang.startsWith("ar"),
+      }
+
+      const selectedVoice =
+        voices.find(voiceMap[selectedLanguage]) ||
+        voices.find((v) => v.lang.startsWith("en")) ||
+        voices[0]
+
+      utterance.voice = selectedVoice
+      console.log("🎙️ Using voice:", selectedVoice.name, "for language:", selectedLanguage)
+    }
+
+    utterance.onstart = () => {
+      console.log("✅ Speech started")
+      isSpeakingRef.current = true
+      setIsSpeaking(true)
+      setSpeechProgress(0)
+
+      const estimatedDuration = audioTranscript.length * 60
+      const updateInterval = Math.max(100, estimatedDuration / 100)
+
+      progressIntervalRef.current = setInterval(() => {
+        setSpeechProgress((prev) => {
+          if (prev >= 95) return prev
+          return prev + 1
+        })
+      }, updateInterval)
+    }
+
+    utterance.onend = () => {
+      console.log("✅ Speech completed")
+      isSpeakingRef.current = false
+      setIsSpeaking(false)
+      setSpeechProgress(100)
+      
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current)
+        progressIntervalRef.current = null
       }
     }
 
-    return () => {
-      console.log("Component unmounting, cleaning up speech")
-      try {
-        speechSynthesis.cancel()
-        setIsSpeaking(false)
-      } catch (error) {
-        console.warn("Error cleaning up speech on unmount:", error)
+    utterance.onerror = (event) => {
+      console.warn("⚠️ Speech error:", event.error)
+      
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current)
+        progressIntervalRef.current = null
+      }
+
+      isSpeakingRef.current = false
+      setIsSpeaking(false)
+      setSpeechProgress(0)
+
+      if (event.error !== "interrupted" && event.error !== "canceled") {
+        alert(`Speech synthesis error: ${event.error}`)
       }
     }
-  }, [showAudioPlayer, isSpeaking])
 
-  // Ensure speech synthesis voices are loaded and handle page visibility
+    speechSynthesis.speak(utterance)
+  }, [aiAnalysis?.audioSummary, aiAnalysis?.translations, selectedLanguage])
+
   useEffect(() => {
     if ("speechSynthesis" in window) {
-      // Load voices
       const loadVoices = () => {
         const voices = speechSynthesis.getVoices()
-        console.log("Available voices loaded:", voices.length)
+        console.log("🎙️ Available voices loaded:", voices.length)
       }
 
-      // Voices might load asynchronously
       if (speechSynthesis.getVoices().length === 0) {
         speechSynthesis.addEventListener("voiceschanged", loadVoices)
       } else {
         loadVoices()
       }
 
-      // Handle page visibility changes to prevent speech interruption
-      const handleVisibilityChange = () => {
-        if (document.hidden && isSpeaking) {
-          console.log("Page became hidden while speaking - speech may be interrupted by browser")
-          // Don't manually cancel, let browser handle it
-        } else if (!document.hidden && speechRef.current && !isSpeaking) {
-          console.log("Page became visible again")
-        }
-      }
-
-      // Handle beforeunload to clean up speech
-      const handleBeforeUnload = () => {
-        try {
-          speechSynthesis.cancel()
-        } catch (error) {
-          console.warn("Error cancelling speech on page unload:", error)
-        }
-      }
-
-      document.addEventListener("visibilitychange", handleVisibilityChange)
-      window.addEventListener("beforeunload", handleBeforeUnload)
-
       return () => {
         speechSynthesis.removeEventListener("voiceschanged", loadVoices)
-        document.removeEventListener("visibilitychange", handleVisibilityChange)
-        window.removeEventListener("beforeunload", handleBeforeUnload)
       }
     }
-  }, [isSpeaking])
+  }, [])
 
+  // Loading State
   if (isInitialLoading || !product) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-orange-50 via-yellow-50 to-lime-50 flex items-center justify-center">
         {isInitialLoading ? (
-          // Enhanced Loading Animation
           <motion.div
             className="text-center max-w-sm mx-auto px-6"
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
             transition={{ duration: 0.5 }}
           >
-            {/* Main Loading Icon */}
             <motion.div
               className="relative w-32 h-32 mx-auto mb-8"
               initial={{ scale: 0.8 }}
               animate={{ scale: 1 }}
               transition={{ duration: 0.6, ease: "easeOut" }}
             >
-              {/* Outer Gradient Ring */}
               <motion.div
                 className="absolute inset-0 rounded-full bg-gradient-to-r from-orange-500 via-yellow-500 to-lime-500 p-1"
                 animate={{ rotate: 360 }}
@@ -1198,7 +756,6 @@ Complete ingredient analysis and dietary compatibility information are now avail
                 <div className="w-full h-full bg-gradient-to-br from-orange-50 via-yellow-50 to-lime-50 rounded-full" />
               </motion.div>
 
-              {/* Inner Analysis Ring */}
               <motion.div
                 className="absolute inset-4 border-4 border-gradient-to-r from-orange-400 to-lime-400 rounded-full border-dashed"
                 animate={{ rotate: -360 }}
@@ -1206,7 +763,6 @@ Complete ingredient analysis and dietary compatibility information are now avail
                 style={{ borderImage: "linear-gradient(45deg, #f97316, #84cc16) 1" }}
               />
 
-              {/* Center Icon */}
               <div className="absolute inset-0 flex items-center justify-center">
                 <motion.div
                   className="w-16 h-16 bg-gradient-to-r from-orange-500 to-lime-500 rounded-full flex items-center justify-center shadow-lg"
@@ -1217,7 +773,6 @@ Complete ingredient analysis and dietary compatibility information are now avail
                 </motion.div>
               </div>
 
-              {/* Floating Analysis Dots */}
               {[...Array(8)].map((_, i) => (
                 <motion.div
                   key={i}
@@ -1239,7 +794,6 @@ Complete ingredient analysis and dietary compatibility information are now avail
               ))}
             </motion.div>
 
-            {/* Loading Text */}
             <motion.div
               initial={{ y: 20, opacity: 0 }}
               animate={{ y: 0, opacity: 1 }}
@@ -1261,7 +815,6 @@ Complete ingredient analysis and dietary compatibility information are now avail
                 Preparing comprehensive nutritional insights...
               </motion.p>
 
-              {/* Analysis Steps */}
               <div className="space-y-3 mb-6">
                 {[
                   "Processing ingredients",
@@ -1290,7 +843,6 @@ Complete ingredient analysis and dietary compatibility information are now avail
                 ))}
               </div>
 
-              {/* Progress Indicator */}
               <div className="w-64 h-2 bg-gray-200 rounded-full mx-auto overflow-hidden">
                 <motion.div
                   className="h-full bg-gradient-to-r from-orange-500 via-yellow-500 to-lime-500 rounded-full"
@@ -1302,7 +854,6 @@ Complete ingredient analysis and dietary compatibility information are now avail
             </motion.div>
           </motion.div>
         ) : (
-          // No Product Data State
           <div className="text-center">
             <div className="w-16 h-16 bg-gradient-to-r from-orange-500 to-lime-500 rounded-full flex items-center justify-center mx-auto mb-4 animate-pulse">
               <BarChart3 className="w-8 h-8 text-white" />
@@ -1320,41 +871,101 @@ Complete ingredient analysis and dietary compatibility information are now avail
     )
   }
 
-  // Use the enhanced function to get the grade
-  const grade = calculateNutritionGrade(product)
+  // AI Loading State
+  if (aiLoading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-orange-50 via-yellow-50 to-lime-50 flex items-center justify-center">
+        <motion.div
+          className="text-center max-w-md mx-auto px-6"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+        >
+          <motion.div
+            className="w-24 h-24 mx-auto mb-6"
+            animate={{ rotate: 360 }}
+            transition={{ duration: 2, repeat: Number.POSITIVE_INFINITY, ease: "linear" }}
+          >
+            <div className="w-full h-full border-4 border-orange-500 border-t-transparent rounded-full" />
+          </motion.div>
+          <h2 className="text-2xl font-bold text-gray-800 mb-3">AI Analysis in Progress</h2>
+          <p className="text-gray-600 mb-4">
+            Gemini AI is analyzing ingredients and generating insights...
+          </p>
+          <div className="flex items-center justify-center space-x-2 text-sm text-gray-500">
+            <div className="w-2 h-2 bg-orange-500 rounded-full animate-pulse" />
+            <span>This may take a few seconds</span>
+          </div>
+        </motion.div>
+      </div>
+    )
+  }
+
+  // AI Error State
+  if (aiError) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-orange-50 via-yellow-50 to-lime-50 flex items-center justify-center">
+        <div className="text-center max-w-md mx-auto px-6">
+          <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
+            <AlertTriangle className="w-8 h-8 text-red-600" />
+          </div>
+          <h2 className="text-xl font-semibold text-gray-800 mb-2">AI Analysis Failed</h2>
+          <p className="text-gray-600 mb-4">{aiError}</p>
+          <div className="space-x-3">
+            <Button
+              onClick={() => {
+                hasAnalyzedRef.current = false
+                product && runGeminiAnalysis(product)
+              }}
+              className="bg-gradient-to-r from-orange-500 to-lime-500 text-white"
+            >
+              Retry Analysis
+            </Button>
+            <Link href="/home">
+              <Button variant="outline">Go Back</Button>
+            </Link>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const grade = calculateNutritionGrade(product, aiAnalysis?.healthScore)
   const dangerousNutrients = nutrients.filter((nutrient) => isDangerous(nutrient, product.nutriments?.[nutrient.key]))
   const safeNutrients = nutrients.filter((nutrient) => !isDangerous(nutrient, product.nutriments?.[nutrient.key]))
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-orange-50 via-yellow-50 to-lime-50">
+    <div className="min-h-screen bg-gradient-to-br from-orange-50 via-yellow-50 to-lime-50 pb-20">
       {/* Header */}
       <motion.header
-        className="bg-gradient-to-r from-orange-500 via-yellow-500 to-lime-500 text-white p-6 shadow-lg"
+        className="bg-gradient-to-r from-orange-500 via-yellow-500 to-lime-500 text-white p-4 lg:p-6 shadow-lg"
         initial={{ y: -100 }}
         animate={{ y: 0 }}
         transition={{ duration: 0.5 }}
       >
         <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-4">
+          <div className="flex items-center space-x-3 lg:space-x-4 flex-1 min-w-0">
             <Link href="/home">
-              <Button variant="ghost" size="icon" className="text-white hover:bg-white/20 rounded-full">
+              <Button variant="ghost" size="icon" className="text-white hover:bg-white/20 rounded-full flex-shrink-0">
                 <ArrowLeft className="w-5 h-5" />
               </Button>
             </Link>
-            <div>
-              <h1 className="text-xl lg:text-2xl font-bold">{product.product_name || "Unknown Product"}</h1>
-              {product.brands && <p className="text-orange-100 text-sm lg:text-base">{product.brands}</p>}
+            <div className="min-w-0 flex-1">
+              <h1 className="text-lg lg:text-2xl font-bold truncate">{product.product_name || "Unknown Product"}</h1>
+              {product.brands && <p className="text-orange-100 text-xs lg:text-base truncate">{product.brands}</p>}
             </div>
           </div>
 
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={toggleAudioPlayer}
-            className="text-white hover:bg-white/20 rounded-full"
-          >
-            <Volume2 className="w-5 h-5" />
-          </Button>
+          <div className="flex items-center space-x-2 flex-shrink-0">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={toggleAudioPlayer}
+              className="text-white hover:bg-white/20 rounded-full"
+              disabled={!aiAnalysis?.audioSummary}
+            >
+              <Volume2 className="w-5 h-5" />
+            </Button>
+          </div>
         </div>
       </motion.header>
 
@@ -1362,12 +973,12 @@ Complete ingredient analysis and dietary compatibility information are now avail
         {/* Serving Size Section */}
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6 }}>
           <Card className="shadow-lg bg-white/80 backdrop-blur-sm border-0">
-            <CardContent className="p-6">
+            <CardContent className="p-4 lg:p-6">
               <div className="flex items-center mb-4">
                 <div className="w-8 h-8 bg-gradient-to-r from-orange-500 to-yellow-500 rounded-full flex items-center justify-center mr-3">
                   <Weight className="w-4 h-4 text-white" />
                 </div>
-                <h2 className="text-lg font-semibold text-gray-900">Serving Size</h2>
+                <h2 className="text-base lg:text-lg font-semibold text-gray-900">Serving Size</h2>
               </div>
               <Input
                 type="number"
@@ -1377,7 +988,7 @@ Complete ingredient analysis and dietary compatibility information are now avail
                 className="mb-2"
                 min="1"
               />
-              <p className="text-sm text-gray-600">
+              <p className="text-xs lg:text-sm text-gray-600">
                 {servingSize ? `Calculations based on ${servingSize}g serving` : "Enter serving size to calculate"}
               </p>
             </CardContent>
@@ -1391,17 +1002,16 @@ Complete ingredient analysis and dietary compatibility information are now avail
           transition={{ duration: 0.6, delay: 0.1 }}
         >
           <Card className="shadow-lg bg-white/80 backdrop-blur-sm border-0">
-            <CardContent className="p-6">
+            <CardContent className="p-4 lg:p-6">
               <div className="flex items-center mb-6">
                 <div className="w-8 h-8 bg-gradient-to-r from-yellow-500 to-lime-500 rounded-full flex items-center justify-center mr-3">
                   <Star className="w-4 h-4 text-white" />
                 </div>
-                <h2 className="text-lg font-semibold text-gray-900">Overall Product Rating</h2>
+                <h2 className="text-base lg:text-lg font-semibold text-gray-900">Overall Product Rating</h2>
               </div>
 
               <div className="flex flex-col lg:flex-row items-center space-y-6 lg:space-y-0 lg:space-x-8">
-                {/* Rating Circle */}
-                <div className="relative">
+                <div className="relative flex-shrink-0">
                   <div
                     className={`w-20 h-20 lg:w-24 lg:h-24 rounded-full bg-gradient-to-r ${getGradeColor(grade)} flex items-center justify-center shadow-lg`}
                   >
@@ -1411,16 +1021,17 @@ Complete ingredient analysis and dietary compatibility information are now avail
                   </div>
                 </div>
 
-                {/* Rating Scale */}
                 <div className="flex-1 w-full">
-                  <p className="text-center lg:text-left font-medium mb-3">Nutritional Quality</p>
+                  <p className="text-center lg:text-left font-medium mb-3 text-sm lg:text-base">
+                    AI Health Score: {aiAnalysis ? aiAnalysis.healthScore : "—"}/100
+                  </p>
                   <div className="relative h-2 bg-gradient-to-r from-red-500 via-yellow-500 to-green-500 rounded-full">
                     <div
                       className="absolute w-4 h-4 bg-white border-2 border-gray-800 rounded-full transform -translate-y-1 -translate-x-2 shadow-lg transition-all duration-500"
                       style={{ left: getGradePosition(grade) }}
                     />
                   </div>
-                  <div className="flex justify-between text-xs text-gray-600 mt-2">
+                  <div className="flex justify-between text-[10px] lg:text-xs text-gray-600 mt-2">
                     <span>Very Bad</span>
                     <span>Bad</span>
                     <span>Good</span>
@@ -1433,39 +1044,118 @@ Complete ingredient analysis and dietary compatibility information are now avail
           </Card>
         </motion.div>
 
-        {/* Warning Section */}
-        <AnimatePresence>
-          {dangerousNutrients.length > 0 && (
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              transition={{ duration: 0.6, delay: 0.2 }}
-            >
-              <Card className="shadow-lg bg-red-50 border-red-200">
-                <CardContent className="p-6">
-                  <div className="flex items-center mb-4">
-                    <div className="w-8 h-8 bg-gradient-to-r from-red-500 to-orange-500 rounded-full flex items-center justify-center mr-3">
-                      <AlertTriangle className="w-4 h-4 text-white" />
+        {/* FIXED: AI Health Insights - Now using AI-generated content */}
+        {aiAnalysis && aiAnalysis.scoreExplanation && aiAnalysis.scoreExplanation.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6, delay: 0.15 }}
+          >
+            <Card className="shadow-lg bg-white/80 backdrop-blur-sm border-0">
+              <CardContent className="p-4 lg:p-6">
+                <div className="flex items-center mb-4">
+                  <div className="w-8 h-8 bg-gradient-to-r from-purple-500 to-pink-500 rounded-full flex items-center justify-center mr-3">
+                    <BarChart3 className="w-4 h-4 text-white" />
+                  </div>
+                  <h2 className="text-base lg:text-lg font-semibold text-gray-900">
+                    🧠 AI Health Insights
+                  </h2>
+                </div>
+
+                <div className="space-y-3">
+                  {/* AI-Generated Overall Interpretation */}
+                  {aiAnalysis.scoreExplanation[0] && (
+                    <div className="bg-gray-50 rounded-lg p-3 lg:p-4">
+                      <p className="text-xs font-medium text-purple-600 mb-1">
+                        Overall Interpretation
+                      </p>
+                      <p className="text-xs lg:text-sm text-gray-800">
+                        {aiAnalysis.scoreExplanation[0]}
+                      </p>
                     </div>
-                    <h2 className="text-lg font-semibold text-red-800">Warnings</h2>
+                  )}
+
+                  {/* AI-Generated Nutrition Advice */}
+                  {aiAnalysis.scoreExplanation[1] && (
+                    <div className="bg-gray-50 rounded-lg p-3 lg:p-4">
+                      <p className="text-xs font-medium text-purple-600 mb-1">
+                        Nutrition Advice
+                      </p>
+                      <p className="text-xs lg:text-sm text-gray-800">
+                        {aiAnalysis.scoreExplanation[1]}
+                      </p>
+                    </div>
+                  )}
+
+                  {/* AI-Generated Smart Tip */}
+                  {aiAnalysis.scoreExplanation[2] && (
+                    <div className="bg-gray-50 rounded-lg p-3 lg:p-4 border-l-4 border-purple-500">
+                      <p className="text-xs font-medium text-purple-600 mb-1">
+                        💡 Smart AI Tip
+                      </p>
+                      <p className="text-xs lg:text-sm font-medium text-gray-800">
+                        {aiAnalysis.scoreExplanation[2]}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          </motion.div>
+        )}
+
+        {/* Daily Consumption Advice */}
+        {aiAnalysis?.dailyConsumptionAdvice && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6, delay: 0.2 }}
+          >
+            <Card className="shadow-lg bg-white/80 backdrop-blur-sm border-0">
+              <CardContent className="p-4 lg:p-6">
+                <div className="flex items-center mb-4">
+                  <div className="w-8 h-8 bg-gradient-to-r from-blue-500 to-indigo-500 rounded-full flex items-center justify-center mr-3">
+                    <Utensils className="w-4 h-4 text-white" />
                   </div>
-                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                    {dangerousNutrients.map((nutrient) => (
-                      <div key={nutrient.key} className="bg-white/70 rounded-lg p-4 border-l-4 border-red-500">
-                        <div className="font-medium text-red-800 text-sm mb-1">{nutrient.label}</div>
-                        <div className="text-lg font-bold text-red-600 mb-1">
-                          {getAdjustedValue(product.nutriments?.[nutrient.key])} {nutrient.unit}
-                        </div>
-                        <div className="text-xs text-red-600">High content</div>
-                      </div>
-                    ))}
+                  <h2 className="text-base lg:text-lg font-semibold text-gray-900">📅 Can I Eat This Daily?</h2>
+                </div>
+                <div className="bg-gray-50 rounded-lg p-3 lg:p-4">
+                  <p className="text-xs lg:text-sm text-gray-800 leading-relaxed">{aiAnalysis.dailyConsumptionAdvice}</p>
+                </div>
+              </CardContent>
+            </Card>
+          </motion.div>
+        )}
+
+        {/* Hidden Concerns */}
+        {aiAnalysis?.hiddenConcerns && aiAnalysis.hiddenConcerns.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6, delay: 0.25 }}
+          >
+            <Card className="shadow-lg bg-white/80 backdrop-blur-sm border-0">
+              <CardContent className="p-4 lg:p-6">
+                <div className="flex items-center mb-4">
+                  <div className="w-8 h-8 bg-gradient-to-r from-orange-500 to-red-500 rounded-full flex items-center justify-center mr-3">
+                    <AlertTriangle className="w-4 h-4 text-white" />
                   </div>
-                </CardContent>
-              </Card>
-            </motion.div>
-          )}
-        </AnimatePresence>
+                  <h2 className="text-base lg:text-lg font-semibold text-gray-900">🔍 What Labels Hide</h2>
+                </div>
+                <div className="space-y-2">
+                  {aiAnalysis.hiddenConcerns.map((concern, index) => (
+                    <div key={index} className="bg-gray-50 rounded-lg p-3 border-l-4 border-orange-500">
+                      <p className="text-xs lg:text-sm text-gray-800">{concern}</p>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-xs text-gray-500 mt-3 italic">
+                  AI-detected concerns that aren't obvious from packaging
+                </p>
+              </CardContent>
+            </Card>
+          </motion.div>
+        )}
 
         {/* Nutritional Facts Section */}
         <motion.div
@@ -1474,141 +1164,395 @@ Complete ingredient analysis and dietary compatibility information are now avail
           transition={{ duration: 0.6, delay: 0.3 }}
         >
           <Card className="shadow-lg bg-white/80 backdrop-blur-sm border-0">
-            <CardContent className="p-6">
+            <CardContent className="p-4 lg:p-6">
               <div className="flex items-center mb-6">
                 <div className="w-8 h-8 bg-gradient-to-r from-lime-500 to-green-500 rounded-full flex items-center justify-center mr-3">
                   <BarChart3 className="w-4 h-4 text-white" />
                 </div>
-                <h2 className="text-lg font-semibold text-gray-900">Nutritional Facts Analysis</h2>
+                <h2 className="text-base lg:text-lg font-semibold text-gray-900">Nutritional Facts Analysis</h2>
               </div>
-              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                {safeNutrients.map((nutrient) => (
-                  <div key={nutrient.key} className="bg-gray-50 rounded-lg p-4">
-                    <div className="font-medium text-gray-800 text-sm mb-1">{nutrient.label}</div>
-                    <div className="text-lg font-bold text-gray-900 mb-1">
-                      {getAdjustedValue(product.nutriments?.[nutrient.key])} {nutrient.unit}
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 lg:gap-4 mb-6">
+                {nutrients.map((nutrient) => {
+                  const value = product.nutriments?.[nutrient.key]
+                  const dangerous = isDangerous(nutrient, value)
+                  return (
+                    <div
+                      key={nutrient.key}
+                      className={`rounded-lg p-3 lg:p-4 ${dangerous ? "bg-red-50 border-l-4 border-red-500" : "bg-gray-50"}`}
+                    >
+                      <div className={`font-medium text-xs lg:text-sm mb-1 ${dangerous ? "text-red-800" : "text-gray-800"}`}>
+                        {nutrient.label}
+                      </div>
+                      <div className={`text-base lg:text-lg font-bold mb-1 ${dangerous ? "text-red-600" : "text-gray-900"}`}>
+                        {getAdjustedValue(value)} {nutrient.unit}
+                      </div>
+                      <div className={`text-[10px] lg:text-xs ${dangerous ? "text-red-600" : "text-gray-600"}`}>
+                        {dangerous ? "High content" : servingSize ? "Per serving" : "Per 100g"}
+                      </div>
                     </div>
-                    <div className="text-xs text-gray-600">{servingSize ? "Per serving" : "Per 100g"}</div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
+
+              {/* AI Nutritional Insights */}
+              {aiAnalysis?.nutritionalInsights && aiAnalysis.nutritionalInsights.length > 0 && (
+                <div className="mt-6 pt-6 border-t border-gray-200">
+                  <div className="flex items-center mb-4">
+                    <div className="w-8 h-8 bg-gradient-to-r from-indigo-500 to-purple-500 rounded-full flex items-center justify-center mr-3">
+                      <Lightbulb className="w-4 h-4 text-white" />
+                    </div>
+                    <h3 className="text-sm lg:text-base font-semibold text-gray-900">🤖 AI Nutritional Insights</h3>
+                  </div>
+                  <div className="space-y-2">
+                    {aiAnalysis.nutritionalInsights.slice(0, 5).map((insight, index) => (
+                      <div key={index} className="bg-gray-50 rounded-lg p-3 border-l-4 border-indigo-500">
+                        <p className="text-xs lg:text-sm text-gray-800">{insight}</p>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-xs text-gray-500 mt-3 italic">
+                    AI-powered analysis of nutritional content
+                  </p>
+                </div>
+              )}
             </CardContent>
           </Card>
         </motion.div>
 
-        {/* Ingredient Analysis Section */}
+        {/* AI Ingredient Analysis Section */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.6, delay: 0.4 }}
         >
           <Card className="shadow-lg bg-white/80 backdrop-blur-sm border-0">
-            <CardContent className="p-6">
+            <CardContent className="p-4 lg:p-6">
               <div className="flex items-center mb-6">
                 <div className="w-8 h-8 bg-gradient-to-r from-blue-500 to-purple-500 rounded-full flex items-center justify-center mr-3">
                   <Search className="w-4 h-4 text-white" />
                 </div>
-                <h2 className="text-lg font-semibold text-gray-900">Ingredient Analysis</h2>
+                <h2 className="text-base lg:text-lg font-semibold text-gray-900">AI Ingredient Analysis</h2>
               </div>
 
               {product.ingredients_text && (
                 <div className="mb-6">
-                  <h3 className="font-medium text-gray-800 mb-2">Ingredients</h3>
-                  <p className="text-sm text-gray-600 bg-gray-50 p-3 rounded-lg">{product.ingredients_text}</p>
+                  <h3 className="font-medium text-sm lg:text-base text-gray-800 mb-2">Ingredients</h3>
+                  <p className="text-xs lg:text-sm text-gray-600 bg-gray-50 p-3 rounded-lg">{product.ingredients_text}</p>
                 </div>
               )}
 
-              {isAnalyzing ? (
-                <div className="flex items-center justify-center py-8">
-                  <div className="flex items-center space-x-3">
-                    <div className="w-6 h-6 border-2 border-orange-500 border-t-transparent rounded-full animate-spin" />
-                    <span className="text-gray-600">Analyzing ingredients...</span>
-                  </div>
-                </div>
-              ) : (
+              {aiAnalysis?.ingredientAnalysis && aiAnalysis.ingredientAnalysis.length > 0 ? (
                 <div className="space-y-3">
-                  {ingredientAnalysis.map((item, index) => (
+                  {aiAnalysis.ingredientAnalysis.map((item, index) => (
                     <motion.div
                       key={index}
                       initial={{ opacity: 0, x: -20 }}
                       animate={{ opacity: 1, x: 0 }}
-                      transition={{ duration: 0.3, delay: index * 0.1 }}
-                      className="flex items-center justify-between p-3 bg-gray-50 rounded-lg"
+                      transition={{ duration: 0.3, delay: index * 0.05 }}
+                      className="flex flex-col p-3 bg-gray-50 rounded-lg"
                     >
-                      <span className="font-medium text-gray-800">{item.ingredient}</span>
-                      <div
-                        className={`px-3 py-1 rounded-full text-xs font-medium ${
-                          item.status === "good"
-                            ? "bg-green-100 text-green-800"
-                            : item.status === "moderate"
-                              ? "bg-yellow-100 text-yellow-800"
-                              : "bg-red-100 text-red-800"
-                        }`}
-                      >
-                        {item.status} - {item.reason}
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-medium text-xs lg:text-sm text-gray-800">{item.ingredient}</span>
+                        <div
+                          className={`px-2 lg:px-3 py-1 rounded-full text-[10px] lg:text-xs font-medium ${
+                            item.status === "good"
+                              ? "bg-green-100 text-green-800"
+                              : item.status === "moderate"
+                                ? "bg-yellow-100 text-yellow-800"
+                                : "bg-red-100 text-red-800"
+                          }`}
+                        >
+                          {item.status}
+                        </div>
                       </div>
+                      <p className="text-[10px] lg:text-xs text-gray-600">{item.reason}</p>
                     </motion.div>
                   ))}
                 </div>
+              ) : (
+                <p className="text-xs lg:text-sm text-gray-500 text-center py-4">No ingredient analysis available</p>
               )}
             </CardContent>
           </Card>
         </motion.div>
 
-        {/* Dietary Preferences Section */}
+        {/* AI Dietary Preferences Section */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.6, delay: 0.5 }}
         >
           <Card className="shadow-lg bg-white/80 backdrop-blur-sm border-0">
-            <CardContent className="p-6">
+            <CardContent className="p-4 lg:p-6">
               <div className="flex items-center mb-6">
                 <div className="w-8 h-8 bg-gradient-to-r from-purple-500 to-pink-500 rounded-full flex items-center justify-center mr-3">
                   <Utensils className="w-4 h-4 text-white" />
                 </div>
-                <h2 className="text-lg font-semibold text-gray-900">Dietary Preferences</h2>
+                <h2 className="text-base lg:text-lg font-semibold text-gray-900">AI Dietary Compatibility</h2>
               </div>
-              <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
-                {dietaryPreferences.map((pref, index) => (
-                  <motion.div
-                    key={index}
-                    initial={{ opacity: 0, scale: 0.9 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    transition={{ duration: 0.3, delay: index * 0.1 }}
-                    className="flex flex-col p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors"
-                  >
-                    <div className="flex items-center mb-2">
-                      <span className="text-lg mr-3">{pref.icon}</span>
-                      <div className="flex-1">
-                        <span className="font-medium text-gray-800 text-sm">{pref.name}</span>
+              {aiAnalysis?.dietaryPreferences && aiAnalysis.dietaryPreferences.length > 0 ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 lg:gap-4">
+                  {aiAnalysis.dietaryPreferences.map((pref, index) => (
+                    <motion.div
+                      key={index}
+                      initial={{ opacity: 0, scale: 0.9 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      transition={{ duration: 0.3, delay: index * 0.1 }}
+                      className="flex flex-col p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors"
+                    >
+                      <div className="flex items-center mb-2">
+                        <span className="text-base lg:text-lg mr-3">{pref.icon}</span>
+                        <div className="flex-1 min-w-0">
+                          <span className="font-medium text-gray-800 text-xs lg:text-sm truncate">{pref.name}</span>
+                        </div>
+                        {pref.found ? (
+                          <CheckCircle className="w-4 h-4 lg:w-5 lg:h-5 text-green-500 flex-shrink-0" />
+                        ) : (
+                          <XCircle className="w-4 h-4 lg:w-5 lg:h-5 text-red-500 flex-shrink-0" />
+                        )}
                       </div>
-                      {pref.found ? (
-                        <CheckCircle className="w-5 h-5 text-green-500" />
-                      ) : (
-                        <XCircle className="w-5 h-5 text-red-500" />
-                      )}
-                    </div>
-                    {pref.reason && <p className="text-xs text-gray-600 mt-1 leading-relaxed">{pref.reason}</p>}
-                  </motion.div>
-                ))}
-              </div>
+                      {pref.reason && <p className="text-[10px] lg:text-xs text-gray-600 mt-1 leading-relaxed">{pref.reason}</p>}
+                    </motion.div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs lg:text-sm text-gray-500 text-center py-4">No dietary analysis available</p>
+              )}
             </CardContent>
           </Card>
         </motion.div>
+
+        {/* How Gemini Calculated This Score */}
+        {aiAnalysis?.scoreExplanation && aiAnalysis.scoreExplanation.length > 3 && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6, delay: 0.6 }}
+          >
+            <Card className="shadow-lg bg-white/80 backdrop-blur-sm border-0">
+              <CardContent className="p-4 lg:p-6">
+                <div className="flex items-center mb-4">
+                  <div className="w-8 h-8 bg-gradient-to-r from-amber-500 to-yellow-500 rounded-full flex items-center justify-center mr-3">
+                    <Sparkles className="w-4 h-4 text-white" />
+                  </div>
+                  <h2 className="text-base lg:text-lg font-semibold text-gray-900">
+                    🤖 How Gemini Calculated This Score
+                  </h2>
+                </div>
+
+                <div className="space-y-3">
+                  {aiAnalysis.scoreExplanation.slice(3).map((reason, i) => (
+                    <div
+                      key={i}
+                      className="flex items-start bg-gray-50 rounded-lg p-3"
+                    >
+                      <span className="text-amber-500 mr-2 mt-0.5 flex-shrink-0">•</span>
+                      <p className="text-xs lg:text-sm text-gray-800 leading-relaxed">
+                        {reason}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+
+                <p className="text-xs text-gray-500 mt-4 italic">
+                  Generated using Gemini reasoning over ingredients & nutrition science
+                </p>
+              </CardContent>
+            </Card>
+          </motion.div>
+        )}
 
         {/* Footer */}
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          transition={{ duration: 0.6, delay: 0.6 }}
+          transition={{ duration: 0.6, delay: 0.7 }}
           className="text-center py-6"
         >
-          <p className="text-sm text-gray-600">
-            This analysis is for informational purposes only and should not replace professional medical advice.
+          <p className="text-xs lg:text-sm text-gray-600">
+            Analysis powered by Gemini AI. This is for informational purposes only and should not replace professional
+            medical advice.
           </p>
         </motion.div>
       </div>
+
+      {/* Floating Chat Button */}
+      <motion.button
+        initial={{ scale: 0 }}
+        animate={{ scale: 1 }}
+        transition={{ delay: 1, type: "spring" }}
+        onClick={toggleChat}
+        className="fixed bottom-6 right-6 w-14 h-14 lg:w-16 lg:h-16 bg-gradient-to-r from-orange-500 to-lime-500 text-white rounded-full shadow-2xl flex items-center justify-center hover:scale-110 transition-transform z-40"
+      >
+        <MessageCircle className="w-6 h-6 lg:w-7 lg:h-7" />
+      </motion.button>
+
+      {/* FIXED: Chat Modal with Empathetic Rendering */}
+      <AnimatePresence>
+        {showChat && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/50 flex items-end lg:items-center justify-center z-50 p-0 lg:p-4"
+            onClick={toggleChat}
+          >
+            <motion.div
+              initial={{ y: "100%", opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: "100%", opacity: 0 }}
+              transition={{ type: "spring", damping: 25 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-white rounded-t-3xl lg:rounded-2xl w-full lg:max-w-2xl h-[85vh] lg:h-[600px] shadow-2xl flex flex-col overflow-hidden"
+            >
+              {/* Chat Header */}
+              <div className="bg-gradient-to-r from-orange-500 via-yellow-500 to-lime-500 text-white p-4 lg:p-6 flex items-center justify-between flex-shrink-0">
+                <div className="flex items-center space-x-3">
+                  <div className="w-10 h-10 lg:w-12 lg:h-12 bg-white/20 rounded-full flex items-center justify-center backdrop-blur-sm">
+                    <Sparkles className="w-5 h-5 lg:w-6 lg:h-6" />
+                  </div>
+                  <div>
+                    <h3 className="text-base lg:text-lg font-bold">Ask Gemini</h3>
+                    <p className="text-xs text-orange-100">Your nutrition expert</p>
+                  </div>
+                </div>
+                <Button variant="ghost" size="icon" onClick={toggleChat} className="text-white hover:bg-white/20 rounded-full">
+                  <X className="w-5 h-5" />
+                </Button>
+              </div>
+
+              {/* Chat Messages */}
+              <div className="flex-1 overflow-y-auto p-4 lg:p-6 space-y-4 bg-gradient-to-br from-orange-50/30 via-yellow-50/30 to-lime-50/30">
+                {chatMessages.length === 0 && (
+                  <div className="text-center py-8 lg:py-12">
+                    <div className="w-16 h-16 lg:w-20 lg:h-20 bg-gradient-to-r from-orange-500 to-lime-500 rounded-full flex items-center justify-center mx-auto mb-4">
+                      <Sparkles className="w-8 h-8 lg:w-10 lg:h-10 text-white" />
+                    </div>
+                    <h4 className="text-base lg:text-lg font-semibold text-gray-800 mb-2">Ask me anything!</h4>
+                    <p className="text-xs lg:text-sm text-gray-600 mb-6 max-w-sm mx-auto px-4">
+                      I can answer questions about {product.product_name}'s ingredients, nutrition, and health impact.
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 lg:gap-3 max-w-md mx-auto px-4">
+                      {[
+                        "Is this good for weight loss?",
+                        "What are the main concerns?",
+                        "Any healthier alternatives?",
+                        "Can kids eat this daily?",
+                      ].map((suggestion, i) => (
+                        <button
+                          key={i}
+                          onClick={() => sendChatMessage(suggestion)}
+                          className="bg-white hover:bg-gray-50 text-gray-700 text-xs lg:text-sm p-3 rounded-lg border border-gray-200 transition-colors text-left"
+                        >
+                          {suggestion}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* EMPATHETIC MESSAGE RENDERING */}
+                {chatMessages.map((msg, index) => (
+                  <motion.div
+                    key={index}
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.3 }}
+                    className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+                  >
+                    {msg.role === "user" ? (
+                      <div className="max-w-[85%] lg:max-w-[75%] rounded-2xl p-3 lg:p-4 bg-gradient-to-r from-orange-500 to-lime-500 text-white">
+                        <p className="text-xs lg:text-sm leading-relaxed whitespace-pre-wrap">{msg.content}</p>
+                      </div>
+                    ) : (
+                      <div className="max-w-[90%] bg-white rounded-xl p-4 shadow-md border border-gray-100 space-y-3">
+                        {/* Opening (empathetic greeting) */}
+                        <p className="text-sm text-gray-800 font-medium">
+                          {msg.content.opening}
+                        </p>
+
+                        {/* Main Answer */}
+                        <p className="text-sm text-gray-700 leading-relaxed">
+                          {msg.content.mainAnswer}
+                        </p>
+
+                        {/* Key Points */}
+                        {msg.content.keyPoints && msg.content.keyPoints.length > 0 && (
+                          <ul className="list-disc pl-5 text-xs text-gray-600 space-y-1">
+                            {msg.content.keyPoints.map((point, i) => (
+                              <li key={i}>{point}</li>
+                            ))}
+                          </ul>
+                        )}
+
+                        {/* Practical Tip */}
+                        {msg.content.practicalTip && (
+                          <div className="bg-lime-50 border-l-4 border-lime-500 p-3 rounded">
+                            <p className="text-xs font-medium text-lime-800">
+                              💡 {msg.content.practicalTip}
+                            </p>
+                          </div>
+                        )}
+
+                        {/* Follow-up Question */}
+                        {msg.content.followUp && (
+                          <p className="text-xs text-gray-500 italic">
+                            {msg.content.followUp}
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </motion.div>
+                ))}
+
+                {chatLoading && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="flex justify-start"
+                  >
+                    <div className="bg-white shadow-md rounded-2xl p-4 border border-gray-100">
+                      <div className="flex items-center space-x-2">
+                        <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                        <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                        <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+
+                <div ref={chatEndRef} />
+              </div>
+
+              {/* Chat Input */}
+              <div className="p-4 lg:p-6 border-t border-gray-200 bg-white flex-shrink-0">
+                <div className="flex items-center space-x-2 lg:space-x-3">
+                  <Input
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyPress={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault()
+                        sendChatMessage(chatInput)
+                      }
+                    }}
+                    placeholder="Ask about this product..."
+                    className="flex-1 text-sm lg:text-base"
+                    disabled={chatLoading}
+                  />
+                  <Button
+                    onClick={() => sendChatMessage(chatInput)}
+                    disabled={!chatInput.trim() || chatLoading}
+                    className="bg-gradient-to-r from-orange-500 to-lime-500 hover:from-orange-600 hover:to-lime-600 text-white rounded-full w-10 h-10 lg:w-12 lg:h-12 flex items-center justify-center flex-shrink-0"
+                  >
+                    <Send className="w-4 h-4 lg:w-5 lg:h-5" />
+                  </Button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Audio Player Modal */}
       <AnimatePresence>
@@ -1617,7 +1561,7 @@ Complete ingredient analysis and dietary compatibility information are now avail
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/50 flex items-end lg:items-center justify-center z-50 p-4"
+            className="fixed inset-0 bg-black/50 flex items-end lg:items-center justify-center z-50 p-0 lg:p-4"
             onClick={toggleAudioPlayer}
           >
             <motion.div
@@ -1628,34 +1572,73 @@ Complete ingredient analysis and dietary compatibility information are now avail
               className="bg-white rounded-t-2xl lg:rounded-2xl w-full max-w-md shadow-2xl"
             >
               <div className="flex items-center justify-between p-4 border-b">
-                <h3 className="text-lg font-semibold">Audio Summary</h3>
+                <h3 className="text-base lg:text-lg font-semibold">AI Audio Summary</h3>
                 <Button variant="ghost" size="icon" onClick={toggleAudioPlayer}>
                   <X className="w-5 h-5" />
                 </Button>
               </div>
 
-              <div className="p-4">
-                <div className="flex items-center space-x-4 mb-4">
-                  <Button variant="outline" size="icon" onClick={toggleSpeech} className="rounded-full bg-transparent">
-                    {isSpeaking ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+              <div className="p-4 space-y-4">
+                {/* Language Selector */}
+                <div className="flex items-center justify-between bg-gray-50 rounded-lg p-3">
+                  <div className="flex items-center space-x-2">
+                    <Globe className="w-4 h-4 text-gray-600" />
+                    <span className="text-sm font-medium text-gray-700">Language</span>
+                  </div>
+                  <Select value={selectedLanguage} onValueChange={setSelectedLanguage}>
+                    <SelectTrigger className="w-[140px] h-9 bg-white text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {POPULAR_LANGUAGES.map((lang) => (
+                        <SelectItem key={lang.code} value={lang.code} className="text-xs">
+                          <span className="flex items-center gap-2">
+                            <span>{lang.flag}</span>
+                            <span>{lang.label}</span>
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {/* Audio Player */}
+                <div className="flex items-center space-x-3 lg:space-x-4">
+                  <Button 
+                    variant="outline" 
+                    size="icon" 
+                    onClick={handlePlayAudio} 
+                    className="rounded-full bg-transparent flex-shrink-0 w-10 h-10 lg:w-12 lg:h-12"
+                  >
+                    {isSpeaking ? <Pause className="w-4 h-4 lg:w-5 lg:h-5" /> : <Play className="w-4 h-4 lg:w-5 lg:h-5" />}
                   </Button>
-                  <div className="flex-1">
+                  <div className="flex-1 min-w-0">
                     <div className="h-2 bg-gray-200 rounded-full">
                       <div
                         className="h-2 bg-gradient-to-r from-orange-500 to-lime-500 rounded-full transition-all duration-300"
                         style={{ width: `${speechProgress}%` }}
                       />
                     </div>
-                    <div className="flex justify-between text-xs text-gray-500 mt-1">
+                    <div className="flex justify-between text-[10px] lg:text-xs text-gray-500 mt-1">
                       <span>{isSpeaking ? "Speaking..." : "Ready"}</span>
-                      <span>Text-to-Speech</span>
+                      <span>
+                        {selectedLanguage !== "en" 
+                          ? POPULAR_LANGUAGES.find(l => l.code === selectedLanguage)?.label || "Translated"
+                          : "English"
+                        }
+                      </span>
                     </div>
                   </div>
                 </div>
 
-                <div className="bg-gray-50 rounded-lg p-4">
-                  <h4 className="font-medium mb-2 text-sm">Transcript:</h4>
-                  <p className="text-sm text-gray-600 leading-relaxed">{audioTranscript}</p>
+                {/* Summary Text */}
+                <div className="bg-gray-50 rounded-lg p-3 lg:p-4 max-h-[40vh] overflow-y-auto">
+                  <h4 className="font-medium mb-2 text-xs lg:text-sm">AI-Generated Summary:</h4>
+                  <p className="text-xs lg:text-sm text-gray-600 leading-relaxed">
+                    {selectedLanguage === "en"
+                      ? aiAnalysis?.audioSummary
+                      : aiAnalysis?.translations?.[selectedLanguage] || aiAnalysis?.audioSummary || "No audio summary available"}
+                  </p>
                 </div>
               </div>
             </motion.div>
