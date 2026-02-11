@@ -597,7 +597,7 @@ curl -X POST http://localhost:3000/api/gemini/analyze-product \
 
 ### ✅ **Reliability**
 - **Strict prompt discipline** (prevents hallucinated formats)
-- **Colab-first testing** (judge-friendly, Google-native)
+- **Colab-first testing** (user-friendly, Google-native)
 - **pnpm for reproducible builds**
 
 </td>
